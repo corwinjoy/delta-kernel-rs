@@ -129,8 +129,8 @@ impl<E: TaskExecutor> FileSystemClient for ObjectStoreFileSystemClient<E> {
                             }
                             _ => {
                                 if let Some(rng) = range {
-                                    let rng64 = std::ops::Range { start: rng.start as u64, end: rng.end as u64 };
-                                    Ok(store.get_range(&path, rng64).await?)
+                                    // let rng64 = std::ops::Range { start: rng.start as u64, end: rng.end as u64 };
+                                    Ok(store.get_range(&path, rng).await?)
                                 } else {
                                     let result = store.get(&path).await?;
                                     Ok(result.bytes().await?)
