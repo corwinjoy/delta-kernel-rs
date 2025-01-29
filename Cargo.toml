@@ -27,18 +27,19 @@ version = "0.6.1"
 # its own arrow version ranges witeh modified features. Failure to do so will
 # result in compilation errors as two different sets of arrow dependencies may
 # be sourced
-arrow = { version = ">=53, <55" }
-arrow-arith = { version = ">=53, <55" }
-arrow-array = { version = ">=53, <55" }
-arrow-buffer = { version = ">=53, <55" }
-arrow-cast = { version = ">=53, <55" }
-arrow-data = { version = ">=53, <55" }
-arrow-ord = { version = ">=53, <55" }
-arrow-json = { version = ">=53, <55" }
-arrow-select = { version = ">=53, <55" }
-arrow-schema = { version = ">=53, <55" }
-parquet = { version = ">=53, <55", features = ["object_store"] }
-object_store = { version = ">=0.11, <0.12" }
+arrow = { git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-arith = { git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-array = { git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-buffer = { git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-cast = { git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-data = { git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-ord = { git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-json = { git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-select = { git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-schema = { git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+parquet = { git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics", features = ["object_store"] }
+object_store = { git = "https://github.com/rok/arrow-rs.git"  }
+
 hdfs-native-object-store = "0.12.0"
 hdfs-native = "0.10.0"
 walkdir = "2.5.0"

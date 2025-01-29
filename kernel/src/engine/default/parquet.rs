@@ -144,7 +144,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
 
         let metadata = self.store.head(&Path::from(path.path())).await?;
         let modification_time = metadata.last_modified.timestamp_millis();
-        if size != metadata.size {
+        if size != metadata.size as usize {
             return Err(Error::generic(format!(
                 "Size mismatch after writing parquet file: expected {}, got {}",
                 size, metadata.size
@@ -328,7 +328,7 @@ impl FileOpener for PresignedUrlOpener {
         Ok(Box::pin(async move {
             // fetch the file from the interweb
             let reader = client.get(file_meta.location).send().await?.bytes().await?;
-            let metadata = ArrowReaderMetadata::load(&reader, Default::default())?;
+            let metadata = ArrowReaderMetadata::load(&reader, Default::default(), None)?;
             let parquet_schema = metadata.schema();
             let (indices, requested_ordering) =
                 get_requested_indices(&table_schema, parquet_schema)?;
