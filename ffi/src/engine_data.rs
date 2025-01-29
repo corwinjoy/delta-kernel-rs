@@ -2,7 +2,7 @@
 
 use delta_kernel::{DeltaResult, EngineData};
 use std::ffi::c_void;
-
+use arrow_schema::DataType;
 use crate::{ExclusiveEngineData, ExternResult, IntoExternResult, SharedExternEngine};
 
 use super::handle::Handle;
@@ -75,8 +75,9 @@ fn get_raw_arrow_data_impl(data: Box<dyn EngineData>) -> DeltaResult<*mut ArrowF
         .into_any()
         .downcast::<delta_kernel::engine::arrow_data::ArrowEngineData>()
         .map_err(|_| delta_kernel::Error::EngineDataType("ArrowEngineData".to_string()))?
-        .record_batch();
-    let sa: arrow_array::StructArray = record_batch.clone().into();
+        .record_batch()
+        .clone();
+    let sa: arrow_array::StructArray = record_batch.into();
     let array_data: arrow_data::ArrayData = sa.into();
     // these call `clone`. is there a way to not copy anything and what exactly are they cloning?
     let array = arrow_data::ffi::FFI_ArrowArray::new(&array_data);
