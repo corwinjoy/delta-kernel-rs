@@ -14,6 +14,7 @@ use parquet::arrow::arrow_reader::{
 };
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
+use parquet::encryption::decryption::FileDecryptionProperties;
 use uuid::Uuid;
 
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
@@ -251,18 +252,19 @@ impl FileOpener for ParquetOpener {
         let table_schema = self.table_schema.clone();
         let predicate = self.predicate.clone();
         let limit = self.limit;
+        let fd: Option<&FileDecryptionProperties> = None;
 
         Ok(Box::pin(async move {
             // TODO avoid IO by converting passed file meta to ObjectMeta
             let meta = store.head(&path).await?;
             let mut reader = ParquetObjectReader::new(store, meta);
-            let metadata = ArrowReaderMetadata::load_async(&mut reader, Default::default()).await?;
+            let options = ArrowReaderOptions::new(); //.with_page_index(enable_page_index);
+            let metadata = ArrowReaderMetadata::load_async(&mut reader, Default::default(), fd).await?;
             let parquet_schema = metadata.schema();
             let (indices, requested_ordering) =
                 get_requested_indices(&table_schema, parquet_schema)?;
-            let options = ArrowReaderOptions::new(); //.with_page_index(enable_page_index);
             let mut builder =
-                ParquetRecordBatchStreamBuilder::new_with_options(reader, options).await?;
+                ParquetRecordBatchStreamBuilder::new_with_options(reader, options, fd).await?;
             if let Some(mask) = generate_mask(
                 &table_schema,
                 parquet_schema,
