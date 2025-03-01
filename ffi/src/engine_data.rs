@@ -2,7 +2,7 @@
 
 use delta_kernel::{DeltaResult, EngineData};
 use std::ffi::c_void;
-
+use arrow_schema::DataType;
 use crate::{ExclusiveEngineData, ExternResult, IntoExternResult, SharedExternEngine};
 
 use super::handle::Handle;
@@ -71,11 +71,12 @@ pub unsafe extern "C" fn get_raw_arrow_data(
 // TODO: This method leaks the returned pointer memory. How will the engine free it?
 #[cfg(feature = "default-engine")]
 fn get_raw_arrow_data_impl(data: Box<dyn EngineData>) -> DeltaResult<*mut ArrowFFIData> {
-    let record_batch: arrow_array::RecordBatch = data
+    let record_batch = data
         .into_any()
         .downcast::<delta_kernel::engine::arrow_data::ArrowEngineData>()
         .map_err(|_| delta_kernel::Error::EngineDataType("ArrowEngineData".to_string()))?
-        .into();
+        .record_batch()
+        .clone();
     let sa: arrow_array::StructArray = record_batch.into();
     let array_data: arrow_data::ArrayData = sa.into();
     // these call `clone`. is there a way to not copy anything and what exactly are they cloning?

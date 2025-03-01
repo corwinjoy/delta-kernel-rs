@@ -69,7 +69,7 @@ impl<E: TaskExecutor> FileSystemClient for ObjectStoreFileSystemClient<E> {
                             .send(Ok(FileMeta {
                                 location,
                                 last_modified: meta.last_modified.timestamp_millis(),
-                                size: meta.size,
+                                size: meta.size as usize,
                             }))
                             .ok();
                     }
@@ -129,6 +129,7 @@ impl<E: TaskExecutor> FileSystemClient for ObjectStoreFileSystemClient<E> {
                             }
                             _ => {
                                 if let Some(rng) = range {
+                                    // let rng64 = std::ops::Range { start: rng.start as u64, end: rng.end as u64 };
                                     Ok(store.get_range(&path, rng).await?)
                                 } else {
                                     let result = store.get(&path).await?;

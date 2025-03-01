@@ -14,6 +14,7 @@ use parquet::arrow::arrow_reader::{
 };
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
+use parquet::encryption::decryption::FileDecryptionProperties;
 use uuid::Uuid;
 
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
@@ -144,7 +145,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
 
         let metadata = self.store.head(&Path::from(path.path())).await?;
         let modification_time = metadata.last_modified.timestamp_millis();
-        if size != metadata.size {
+        if size != metadata.size as usize {
             return Err(Error::generic(format!(
                 "Size mismatch after writing parquet file: expected {}, got {}",
                 size, metadata.size
@@ -251,16 +252,20 @@ impl FileOpener for ParquetOpener {
         let table_schema = self.table_schema.clone();
         let predicate = self.predicate.clone();
         let limit = self.limit;
+        let fd: Option<&FileDecryptionProperties> = None;
 
         Ok(Box::pin(async move {
             // TODO avoid IO by converting passed file meta to ObjectMeta
             let meta = store.head(&path).await?;
             let mut reader = ParquetObjectReader::new(store, meta);
-            let metadata = ArrowReaderMetadata::load_async(&mut reader, Default::default()).await?;
+            let mut options = ArrowReaderOptions::new(); //.with_page_index(enable_page_index);
+            if let Some(fd_val) = fd {
+                options = options.with_file_decryption_properties(fd_val.clone());
+            }
+            let metadata = ArrowReaderMetadata::load_async(&mut reader, options.clone()).await?;
             let parquet_schema = metadata.schema();
             let (indices, requested_ordering) =
                 get_requested_indices(&table_schema, parquet_schema)?;
-            let options = ArrowReaderOptions::new(); //.with_page_index(enable_page_index);
             let mut builder =
                 ParquetRecordBatchStreamBuilder::new_with_options(reader, options).await?;
             if let Some(mask) = generate_mask(
@@ -328,12 +333,13 @@ impl FileOpener for PresignedUrlOpener {
         Ok(Box::pin(async move {
             // fetch the file from the interweb
             let reader = client.get(file_meta.location).send().await?.bytes().await?;
-            let metadata = ArrowReaderMetadata::load(&reader, Default::default())?;
+            let options = ArrowReaderOptions::new();
+            let metadata = ArrowReaderMetadata::load(&reader, options.clone())?;
             let parquet_schema = metadata.schema();
             let (indices, requested_ordering) =
                 get_requested_indices(&table_schema, parquet_schema)?;
 
-            let options = ArrowReaderOptions::new();
+
             let mut builder =
                 ParquetRecordBatchReaderBuilder::try_new_with_options(reader, options)?;
             if let Some(mask) = generate_mask(
