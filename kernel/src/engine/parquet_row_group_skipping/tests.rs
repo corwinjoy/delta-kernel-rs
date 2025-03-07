@@ -37,7 +37,7 @@ use std::fs::File;
 #[test]
 fn test_get_stat_values() {
     let file = File::open("./tests/data/parquet_row_group_skipping/part-00000-b92e017a-50ba-4676-8322-48fc371c2b59-c000.snappy.parquet").unwrap();
-    let metadata = ArrowReaderMetadata::load(&file, Default::default(), None).unwrap();
+    let metadata = ArrowReaderMetadata::load(&file, Default::default()).unwrap();
 
     // The expression doesn't matter -- it just needs to mention all the columns we care about.
     let columns = Expression::and_from(vec![
