@@ -19,29 +19,11 @@ keywords = ["deltalake", "delta", "datalake"]
 license = "Apache-2.0"
 repository = "https://github.com/delta-io/delta-kernel-rs"
 readme = "README.md"
-rust-version = "1.80"
-version = "0.6.1"
+rust-version = "1.81"
+version = "0.8.0"
 
 [workspace.dependencies]
-# When changing the arrow version range, also modify ffi/Cargo.toml which has
-# its own arrow version ranges witeh modified features. Failure to do so will
-# result in compilation errors as two different sets of arrow dependencies may
-# be sourced
-# arrow = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
-arrow = {  path = "../arrow-rs/arrow" }
-arrow-arith = { path = "../arrow-rs/arrow-arith" }
-arrow-array = { path = "../arrow-rs/arrow-array" }
-arrow-buffer = { path = "../arrow-rs/arrow-buffer" }
-arrow-cast = { path = "../arrow-rs/arrow-cast" }
-arrow-data = { path = "../arrow-rs/arrow-data" }
-arrow-ord = { path = "../arrow-rs/arrow-ord" }
-arrow-json = { path = "../arrow-rs/arrow-json"}
-arrow-select = { path = "../arrow-rs/arrow-select" }
-arrow-schema = { path = "../arrow-rs/arrow-schema" }
-parquet = { path = "../arrow-rs/parquet", features = ["object_store"] }
-# object_store = { git = "https://github.com/rok/arrow-rs.git"  }
-object_store = {version="0.11.2"}
-
-hdfs-native-object-store = "0.12.0"
-hdfs-native = "0.10.0"
+object_store = { version = ">=0.11, <0.12" }
+hdfs-native-object-store = "0.13.0"
+hdfs-native = "0.11.0"
 walkdir = "2.5.0"

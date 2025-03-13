@@ -1,7 +1,10 @@
 use std::os::raw::c_void;
 
-use crate::{handle::Handle, kernel_string_slice, KernelStringSlice, SharedSnapshot};
+use crate::handle::Handle;
+use crate::scan::CStringMap;
+use crate::{kernel_string_slice, KernelStringSlice, SharedSchema};
 use delta_kernel::schema::{ArrayType, DataType, MapType, PrimitiveType, StructType};
+
 /// The `EngineSchemaVisitor` defines a visitor system to allow engines to build their own
 /// representation of a schema from a particular schema within kernel.
 ///
@@ -28,7 +31,6 @@ use delta_kernel::schema::{ArrayType, DataType, MapType, PrimitiveType, StructTy
 ///     that element's (already-visited) children.
 ///  4. The [`visit_schema`] method returns the id of the list of top-level columns
 // WARNING: the visitor MUST NOT retain internal references to the string slices passed to visitor methods
-// TODO: struct field metadata
 #[repr(C)]
 pub struct EngineSchemaVisitor {
     /// opaque state pointer
@@ -44,6 +46,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         is_nullable: bool,
+        metadata: &CStringMap,
         child_list_id: usize,
     ),
 
@@ -54,6 +57,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         is_nullable: bool,
+        metadata: &CStringMap,
         child_list_id: usize,
     ),
 
@@ -65,6 +69,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         is_nullable: bool,
+        metadata: &CStringMap,
         child_list_id: usize,
     ),
 
@@ -74,6 +79,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         is_nullable: bool,
+        metadata: &CStringMap,
         precision: u8,
         scale: u8,
     ),
@@ -84,6 +90,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         is_nullable: bool,
+        metadata: &CStringMap,
     ),
 
     /// Visit a `long` belonging to the list identified by `sibling_list_id`.
@@ -92,6 +99,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         is_nullable: bool,
+        metadata: &CStringMap,
     ),
 
     /// Visit an `integer` belonging to the list identified by `sibling_list_id`.
@@ -100,6 +108,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         is_nullable: bool,
+        metadata: &CStringMap,
     ),
 
     /// Visit a `short` belonging to the list identified by `sibling_list_id`.
@@ -108,6 +117,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         is_nullable: bool,
+        metadata: &CStringMap,
     ),
 
     /// Visit a `byte` belonging to the list identified by `sibling_list_id`.
@@ -116,6 +126,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         is_nullable: bool,
+        metadata: &CStringMap,
     ),
 
     /// Visit a `float` belonging to the list identified by `sibling_list_id`.
@@ -124,6 +135,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         is_nullable: bool,
+        metadata: &CStringMap,
     ),
 
     /// Visit a `double` belonging to the list identified by `sibling_list_id`.
@@ -132,6 +144,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         is_nullable: bool,
+        metadata: &CStringMap,
     ),
 
     /// Visit a `boolean` belonging to the list identified by `sibling_list_id`.
@@ -140,6 +153,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         is_nullable: bool,
+        metadata: &CStringMap,
     ),
 
     /// Visit `binary` belonging to the list identified by `sibling_list_id`.
@@ -148,6 +162,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         is_nullable: bool,
+        metadata: &CStringMap,
     ),
 
     /// Visit a `date` belonging to the list identified by `sibling_list_id`.
@@ -156,6 +171,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         is_nullable: bool,
+        metadata: &CStringMap,
     ),
 
     /// Visit a `timestamp` belonging to the list identified by `sibling_list_id`.
@@ -164,6 +180,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         is_nullable: bool,
+        metadata: &CStringMap,
     ),
 
     /// Visit a `timestamp` with no timezone belonging to the list identified by `sibling_list_id`.
@@ -172,23 +189,28 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         is_nullable: bool,
+        metadata: &CStringMap,
     ),
 }
 
-/// Visit the schema of the passed `SnapshotHandle`, using the provided `visitor`. See the
-/// documentation of [`EngineSchemaVisitor`] for a description of how this visitor works.
+/// Visit the given `schema` using the provided `visitor`. See the documentation of
+/// [`EngineSchemaVisitor`] for a description of how this visitor works.
 ///
 /// This method returns the id of the list allocated to hold the top level schema columns.
 ///
 /// # Safety
 ///
-/// Caller is responsible for passing a valid snapshot handle and schema visitor.
+/// Caller is responsible for passing a valid schema handle and schema visitor.
 #[no_mangle]
 pub unsafe extern "C" fn visit_schema(
-    snapshot: Handle<SharedSnapshot>,
+    schema: Handle<SharedSchema>,
     visitor: &mut EngineSchemaVisitor,
 ) -> usize {
-    let snapshot = unsafe { snapshot.as_ref() };
+    let schema = unsafe { schema.as_ref() };
+    visit_schema_impl(schema, visitor)
+}
+
+fn visit_schema_impl(schema: &StructType, visitor: &mut EngineSchemaVisitor) -> usize {
     // Visit all the fields of a struct and return the list of children
     fn visit_struct_fields(visitor: &EngineSchemaVisitor, s: &StructType) -> usize {
         let child_list_id = (visitor.make_field_list)(visitor.data, s.fields.len());
@@ -197,6 +219,7 @@ pub unsafe extern "C" fn visit_schema(
                 field.name(),
                 field.data_type(),
                 field.is_nullable(),
+                &field.metadata_with_string_values().into(),
                 visitor,
                 child_list_id,
             );
@@ -210,10 +233,12 @@ pub unsafe extern "C" fn visit_schema(
         contains_null: bool,
     ) -> usize {
         let child_list_id = (visitor.make_field_list)(visitor.data, 1);
+        let metadata = CStringMap::default();
         visit_schema_item(
             "array_element",
             &at.element_type,
             contains_null,
+            &metadata,
             visitor,
             child_list_id,
         );
@@ -226,11 +251,20 @@ pub unsafe extern "C" fn visit_schema(
         value_contains_null: bool,
     ) -> usize {
         let child_list_id = (visitor.make_field_list)(visitor.data, 2);
-        visit_schema_item("map_key", &mt.key_type, false, visitor, child_list_id);
+        let metadata = CStringMap::default();
+        visit_schema_item(
+            "map_key",
+            &mt.key_type,
+            false,
+            &metadata,
+            visitor,
+            child_list_id,
+        );
         visit_schema_item(
             "map_value",
             &mt.value_type,
             value_contains_null,
+            &metadata,
             visitor,
             child_list_id,
         );
@@ -242,6 +276,7 @@ pub unsafe extern "C" fn visit_schema(
         name: &str,
         data_type: &DataType,
         is_nullable: bool,
+        metadata: &CStringMap,
         visitor: &EngineSchemaVisitor,
         sibling_list_id: usize,
     ) {
@@ -251,7 +286,8 @@ pub unsafe extern "C" fn visit_schema(
                     visitor.data,
                     sibling_list_id,
                     kernel_string_slice!(name),
-                    is_nullable
+                    is_nullable,
+                    metadata
                     $(, $extra_args) *
                 )
             };
@@ -285,5 +321,5 @@ pub unsafe extern "C" fn visit_schema(
         }
     }
 
-    visit_struct_fields(visitor, snapshot.schema())
+    visit_struct_fields(visitor, schema)
 }

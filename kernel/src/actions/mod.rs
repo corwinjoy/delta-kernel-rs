@@ -16,7 +16,8 @@ use crate::table_features::{
 };
 use crate::table_properties::TableProperties;
 use crate::utils::require;
-use crate::{DeltaResult, EngineData, Error, RowVisitor as _};
+use crate::{DeltaResult, EngineData, Error, FileMeta, RowVisitor as _};
+use url::Url;
 use visitors::{MetadataVisitor, ProtocolVisitor};
 
 use delta_kernel_derive::Schema;
@@ -45,6 +46,8 @@ pub(crate) const SET_TRANSACTION_NAME: &str = "txn";
 pub(crate) const COMMIT_INFO_NAME: &str = "commitInfo";
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const CDC_NAME: &str = "cdc";
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+pub(crate) const SIDECAR_NAME: &str = "sidecar";
 
 static LOG_ADD_SCHEMA: LazyLock<SchemaRef> =
     LazyLock::new(|| StructType::new([Option::<Add>::get_struct_field(ADD_NAME)]).into());
@@ -58,6 +61,7 @@ static LOG_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
         Option::<SetTransaction>::get_struct_field(SET_TRANSACTION_NAME),
         Option::<CommitInfo>::get_struct_field(COMMIT_INFO_NAME),
         Option::<Cdc>::get_struct_field(CDC_NAME),
+        Option::<Sidecar>::get_struct_field(SIDECAR_NAME),
         // We don't support the following actions yet
         //Option::<DomainMetadata>::get_struct_field(DOMAIN_METADATA_NAME),
     ])
@@ -273,17 +277,26 @@ impl Protocol {
     /// support the specified protocol writer version and all enabled writer features?
     pub fn ensure_write_supported(&self) -> DeltaResult<()> {
         match &self.writer_features {
-            // if min_reader_version = 3 and min_writer_version = 7 and all writer features are
-            // supported => OK
-            Some(writer_features)
-                if self.min_reader_version == 3 && self.min_writer_version == 7 =>
-            {
+            Some(writer_features) if self.min_writer_version == 7 => {
+                // if we're on version 7, make sure we support all the specified features
                 ensure_supported_features(writer_features, &SUPPORTED_WRITER_FEATURES)
             }
-            // otherwise not supported
-            _ => Err(Error::unsupported(
-                "Only tables with min reader version 3 and min writer version 7 with no table features are supported."
-            )),
+            Some(_) => {
+                // there are features, but we're not on 7, so the protocol is actually broken
+                Err(Error::unsupported(
+                    "Tables with min writer version != 7 should not have table features.",
+                ))
+            }
+            None => {
+                // no features, we currently only support version 1 in this case
+                require!(
+                    self.min_writer_version == 1,
+                    Error::unsupported(
+                        "Currently delta-kernel-rs can only write to tables with protocol.minWriterVersion = 1 or 7"
+                    )
+                );
+                Ok(())
+            }
         }
     }
 }
@@ -326,9 +339,8 @@ where
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
 #[cfg_attr(test, derive(Serialize, Default), serde(rename_all = "camelCase"))]
-struct CommitInfo {
+pub(crate) struct CommitInfo {
     /// The time this logical file was created, as milliseconds since the epoch.
     /// Read: optional, write: required (that is, kernel always writes).
     pub(crate) timestamp: Option<i64>,
@@ -417,9 +429,8 @@ impl Add {
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
 #[cfg_attr(test, derive(Serialize, Default), serde(rename_all = "camelCase"))]
-struct Remove {
+pub(crate) struct Remove {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by
     /// [RFC 2396 URI Generic Syntax], which needs to be decoded to get the data file path.
@@ -468,9 +479,8 @@ struct Remove {
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
 #[cfg_attr(test, derive(Serialize, Default), serde(rename_all = "camelCase"))]
-struct Cdc {
+pub(crate) struct Cdc {
     /// A relative path to a change data file from the root of the table or an absolute path to a
     /// change data file that should be added to the table. The path is a URI as specified by
     /// [RFC 2396 URI Generic Syntax], which needs to be decoded to get the file path.
@@ -509,6 +519,51 @@ pub struct SetTransaction {
 
     /// The time when this transaction action was created in milliseconds since the Unix epoch.
     pub last_updated: Option<i64>,
+}
+
+/// The sidecar action references a sidecar file which provides some of the checkpoint's
+/// file actions. This action is only allowed in checkpoints following the V2 spec.
+///
+/// [More info]: https://github.com/delta-io/delta/blob/master/PROTOCOL.md#sidecar-file-information
+#[derive(Schema, Debug, PartialEq)]
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+pub(crate) struct Sidecar {
+    /// A path to a sidecar file that can be either:
+    /// - A relative path (just the file name) within the `_delta_log/_sidecars` directory.  
+    /// - An absolute path
+    /// The path is a URI as specified by [RFC 2396 URI Generic Syntax], which needs to be decoded
+    /// to get the file path.
+    ///
+    /// [RFC 2396 URI Generic Syntax]: https://www.ietf.org/rfc/rfc2396.txt
+    pub path: String,
+
+    /// The size of the sidecar file in bytes.
+    pub size_in_bytes: i64,
+
+    /// The time this logical file was created, as milliseconds since the epoch.
+    pub modification_time: i64,
+
+    /// A map containing any additional metadata about the logicial file.
+    pub tags: Option<HashMap<String, String>>,
+}
+
+impl Sidecar {
+    /// Convert a Sidecar record to a FileMeta.
+    ///
+    /// This helper first builds the URL by joining the provided log_root with
+    /// the "_sidecars/" folder and the given sidecar path.
+    pub(crate) fn to_filemeta(&self, log_root: &Url) -> DeltaResult<FileMeta> {
+        Ok(FileMeta {
+            location: log_root.join("_sidecars/")?.join(&self.path)?,
+            last_modified: self.modification_time,
+            size: self.size_in_bytes.try_into().map_err(|_| {
+                Error::generic(format!(
+                    "Failed to convert sidecar size {} to usize",
+                    self.size_in_bytes
+                ))
+            })?,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -637,7 +692,7 @@ mod tests {
     fn test_cdc_schema() {
         let schema = get_log_schema()
             .project(&[CDC_NAME])
-            .expect("Couldn't get remove field");
+            .expect("Couldn't get cdc field");
         let expected = Arc::new(StructType::new([StructField::nullable(
             "cdc",
             StructType::new([
@@ -648,6 +703,23 @@ mod tests {
                 ),
                 StructField::not_null("size", DataType::LONG),
                 StructField::not_null("dataChange", DataType::BOOLEAN),
+                tags_field(),
+            ]),
+        )]));
+        assert_eq!(schema, expected);
+    }
+
+    #[test]
+    fn test_sidecar_schema() {
+        let schema = get_log_schema()
+            .project(&[SIDECAR_NAME])
+            .expect("Couldn't get sidecar field");
+        let expected = Arc::new(StructType::new([StructField::nullable(
+            "sidecar",
+            StructType::new([
+                StructField::not_null("path", DataType::STRING),
+                StructField::not_null("sizeInBytes", DataType::LONG),
+                StructField::not_null("modificationTime", DataType::LONG),
                 tags_field(),
             ]),
         )]));
@@ -739,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v2_checkpoint_unsupported() {
+    fn test_v2_checkpoint_supported() {
         let protocol = Protocol::try_new(
             3,
             7,
@@ -747,7 +819,7 @@ mod tests {
             Some([ReaderFeatures::V2Checkpoint]),
         )
         .unwrap();
-        assert!(protocol.ensure_read_supported().is_err());
+        assert!(protocol.ensure_read_supported().is_ok());
 
         let protocol = Protocol::try_new(
             4,
@@ -777,7 +849,7 @@ mod tests {
             Some(&empty_features),
         )
         .unwrap();
-        assert!(protocol.ensure_read_supported().is_err());
+        assert!(protocol.ensure_read_supported().is_ok());
 
         let protocol = Protocol::try_new(
             3,
@@ -795,7 +867,7 @@ mod tests {
             Some([WriterFeatures::V2Checkpoint]),
         )
         .unwrap();
-        assert!(protocol.ensure_read_supported().is_err());
+        assert!(protocol.ensure_read_supported().is_ok());
 
         let protocol = Protocol {
             min_reader_version: 1,
@@ -816,12 +888,13 @@ mod tests {
 
     #[test]
     fn test_ensure_write_supported() {
-        let protocol = Protocol {
-            min_reader_version: 3,
-            min_writer_version: 7,
-            reader_features: Some(vec![]),
-            writer_features: Some(vec![]),
-        };
+        let protocol = Protocol::try_new(
+            3,
+            7,
+            Some::<Vec<String>>(vec![]),
+            Some(vec![WriterFeatures::AppendOnly]),
+        )
+        .unwrap();
         assert!(protocol.ensure_write_supported().is_ok());
 
         let protocol = Protocol::try_new(
