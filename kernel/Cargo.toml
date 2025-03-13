@@ -64,14 +64,16 @@ tempfile = { version = "3", optional = true }
 # Arrow supported versions
 ## 53
 # Used in default engine
-arrow_53 = { package = "arrow", version = "53", features = ["chrono-tz", "ffi", "json", "prettyprint"], optional = true }
+#arrow_53 = { package = "arrow", version = "53", features = ["chrono-tz", "ffi", "json", "prettyprint"], optional = true }
 # Used in default and sync engine
-parquet_53 = { package = "parquet", version = "53", features = ["async", "object_store"] , optional = true }
+#parquet_53 = { package = "parquet", version = "53", features = ["async", "object_store"] , optional = true }
 ######
 ## 54
-arrow_54 = { package = "arrow", version = "54", features = ["chrono-tz", "ffi", "json", "prettyprint"], optional = true }
-parquet_54 = { package = "parquet", version = "54", features = ["async", "object_store"] , optional = true }
-######
+#arrow_54 = { path = "../../arrow-rs/arrow", package = "arrow", features = ["chrono-tz", "ffi", "json", "prettyprint"], optional = true }
+#parquet_54 = { path = "../../arrow-rs/parquet", package = "parquet", features = ["async", "object_store", "encryption"] , optional = true }
+
+arrow = {  path = "../../arrow-rs/arrow", features = ["chrono-tz", "ffi", "json", "prettyprint"], optional = true }
+parquet = { path = "../../arrow-rs/parquet", features = ["async", "object_store", "encryption"] , optional = true }
 
 futures = { version = "0.3", optional = true }
 object_store = { workspace = true, optional = true }
@@ -90,11 +92,12 @@ walkdir = { workspace = true, optional = true }
 
 [features]
 # The default version to be expected
-arrow = ["arrow_53"]
+# arrow = ["arrow_54"]
 
-arrow_53 = ["dep:arrow_53", "dep:parquet_53"]
+#arrow_53 = ["dep:arrow_53", "dep:parquet_53"]
 
-arrow_54 = ["dep:arrow_54", "dep:parquet_54"]
+arrow_54 = ["dep:arrow", "dep:parquet"]
+arrow = ["dep:arrow", "dep:parquet"]
 
 need_arrow = []
 arrow-conversion = ["need_arrow"]

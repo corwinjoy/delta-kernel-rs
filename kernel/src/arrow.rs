@@ -5,7 +5,7 @@
 pub use arrow_53::*;
 
 #[cfg(all(feature = "arrow_54", not(feature = "arrow_53")))]
-pub use arrow_54::*;
+pub use arrow::*;
 
 // if nothing is enabled but we need arrow because of some other feature flag, default to lowest
 // supported version
