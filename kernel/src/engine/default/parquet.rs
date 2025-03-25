@@ -11,7 +11,7 @@ use crate::parquet::arrow::arrow_reader::{
 };
 use crate::parquet::arrow::arrow_writer::ArrowWriter;
 use crate::parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
-use crate::parquet::encryption::decryption::FileDecryptionProperties;
+use crate::parquet::encryption::decrypt::FileDecryptionProperties;
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::DynObjectStore;
@@ -145,7 +145,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
 
         let metadata = self.store.head(&Path::from(path.path())).await?;
         let modification_time = metadata.last_modified.timestamp_millis();
-        if size != metadata.size as usize {
+        if size != metadata.size {
             return Err(Error::generic(format!(
                 "Size mismatch after writing parquet file: expected {}, got {}",
                 size, metadata.size
