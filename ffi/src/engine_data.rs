@@ -6,7 +6,6 @@ use delta_kernel::arrow::array::{
 };
 use delta_kernel::{DeltaResult, EngineData};
 use std::ffi::c_void;
-
 use crate::{ExclusiveEngineData, ExternResult, IntoExternResult, SharedExternEngine};
 
 use super::handle::Handle;
