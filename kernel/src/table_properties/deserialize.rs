@@ -167,8 +167,8 @@ pub(crate) fn parse_column_names(s: &str) -> Option<Vec<ColumnName>> {
 /// nested field and a name containing a dot is backtick-quoted. The value is split on `;` and the
 /// first `:` of each segment before the quoting is read, so a quoted name may not contain `;`
 /// and a key ID may not contain `:`. An empty string is `Some(vec![])` (uniform encryption); a
-/// segment without a key ID, without columns, or with an unparsable column list makes the whole
-/// value `None`.
+/// segment without a key ID, without columns, with an empty column name, or with an unparsable
+/// column list makes the whole value `None`.
 pub(crate) fn parse_encryption_column_keys(s: &str) -> Option<Vec<EncryptionColumnKey>> {
     s.split(';')
         .map(str::trim)
@@ -177,7 +177,10 @@ pub(crate) fn parse_encryption_column_keys(s: &str) -> Option<Vec<EncryptionColu
             let (key_id, columns) = segment.split_once(':')?;
             let key_id = key_id.trim();
             let columns = parse_column_names(columns)?;
-            (!key_id.is_empty() && !columns.is_empty()).then(|| EncryptionColumnKey {
+            let well_formed = !key_id.is_empty()
+                && !columns.is_empty()
+                && columns.iter().all(|column| !column.path().is_empty());
+            well_formed.then(|| EncryptionColumnKey {
                 key_id: key_id.to_string(),
                 columns,
             })

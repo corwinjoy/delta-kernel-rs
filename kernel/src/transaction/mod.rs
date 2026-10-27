@@ -48,7 +48,7 @@ use crate::schema::{
 use crate::snapshot::{Snapshot, SnapshotRef};
 use crate::struct_patch::ProjectionStructPatchBuilder;
 use crate::table_configuration::TableConfiguration;
-use crate::table_features::TableFeature;
+use crate::table_features::{Operation, TableFeature};
 use crate::utils::{require, PhantomType};
 use crate::{
     create_row, version_as_i64, DataType, Engine, EngineData, Expression, FileMeta, KernelResult,
@@ -716,7 +716,12 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
     /// We perform this same check during [`commit`](Transaction::commit) as defense-in-depth, for
     /// callers that directly use [`add_files`](Transaction::add_files) without going through
     /// [`write_state`](Self::write_state)
+    /// Data files may only be written to a table whose protocol kernel supports for writes and
+    /// whose schema is writable. Update-table transactions already verified write support when
+    /// they were created; CREATE TABLE AS SELECT has no snapshot, so it is checked here.
     fn validate_for_data_write(&self) -> KernelResult<()> {
+        self.effective_table_config
+            .ensure_operation_supported(Operation::Write)?;
         validate_schema_for_write(&self.effective_table_config.logical_schema())
     }
 
@@ -1235,10 +1240,10 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
         #[cfg(feature = "adaptive-metadata-in-dev")]
         self.validate_iceberg_native_v4_semantics()?;
 
-        // Validate that the schema supports data writes when files are being added. Reads and
+        // Validate that the table supports data writes when files are being added. Reads and
         // metadata-only commits are always allowed.
         if self.staged_data_changes.has_adds() {
-            validate_schema_for_write(&self.effective_table_config.logical_schema())?;
+            self.validate_for_data_write()?;
         }
 
         // If a data-changing transaction has add files together with remove files or DV updates,
@@ -3448,7 +3453,11 @@ mod tests {
         txn.effective_table_config = MockTableConfigurationBuilder::new()
             .with_protocol(
                 MockProtocolBuilder::new()
-                    .with_features([TableFeature::RowTracking, TableFeature::ChangeDataFeed])
+                    .with_features([
+                        TableFeature::RowTracking,
+                        TableFeature::DomainMetadata,
+                        TableFeature::ChangeDataFeed,
+                    ])
                     .build(),
             )
             .with_properties([(ENABLE_ROW_TRACKING, true), (ENABLE_CHANGE_DATA_FEED, true)])
@@ -3652,6 +3661,30 @@ mod tests {
         let error = result.expect_err("invalid internal operation must be rejected");
         assert!(matches!(&error, KernelError::InvalidTransactionState(_)));
         assert!(error.to_string().contains(expected), "{error}");
+        Ok(())
+    }
+
+    /// CREATE TABLE AS SELECT on a table whose features kernel cannot write is refused before any
+    /// data file is produced and again at commit, while a metadata-only CREATE TABLE still works.
+    #[cfg(feature = "parquet-encryption-in-dev")]
+    #[test]
+    fn create_table_as_select_requires_write_support() -> KernelResult<()> {
+        let tempdir = tempfile::tempdir()?;
+        let engine = SyncEngine::new();
+        let mut txn = create_table(
+            tempdir.path().to_string_lossy(),
+            test_schema_flat(),
+            "test-engine",
+            true,
+        )
+        .with_table_properties([("delta.encryption.footer_key", "footer-key")])
+        .build(&engine, Box::new(FileSystemCommitter::new()))?;
+        let expected = "Feature 'parquetEncryption-dev' is not supported for writes";
+
+        txn.validate_commit()?;
+        assert_result_error_with_message(txn.write_state(), expected);
+        add_dummy_file(&mut txn);
+        assert_result_error_with_message(txn.validate_commit(), expected);
         Ok(())
     }
 

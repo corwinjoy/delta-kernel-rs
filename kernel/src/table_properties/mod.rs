@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(uniform.encryption_column_keys, Some(vec![]));
 
         // Malformed values fall through to `unknown_properties` like any other property.
-        for bad in ["pii", "pii:", ":ssn", "pii:`unterminated"] {
+        for bad in ["pii", "pii:", ":ssn", "pii:,ssn", "pii:`unterminated"] {
             let props = TableProperties::from([(ENCRYPTION_COLUMN_KEYS, bad)].into_iter());
             assert_eq!(props.encryption_column_keys, None, "{bad}");
             assert_eq!(
