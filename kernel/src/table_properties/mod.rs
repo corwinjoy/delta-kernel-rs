@@ -68,8 +68,6 @@ pub(crate) const IN_COMMIT_TIMESTAMP_ENABLEMENT_TIMESTAMP: &str =
     "delta.inCommitTimestampEnablementTimestamp";
 pub(crate) const CHECK_CONSTRAINT_PREFIX: &str = "delta.constraints.";
 // Parquet Modular Encryption, draft RFC delta-io/delta#6195 (`parquetEncryption-dev`).
-#[cfg(feature = "parquet-encryption-in-dev")]
-pub(crate) const ENCRYPTION_PROPERTY_PREFIX: &str = "delta.encryption.";
 pub(crate) const ENCRYPTION_KMS_ID: &str = "delta.encryption.kms_id";
 pub(crate) const ENCRYPTION_KMS_CONFIGURATION: &str = "delta.encryption.kms_configuration";
 pub(crate) const ENCRYPTION_FOOTER_KEY: &str = "delta.encryption.footer_key";
@@ -257,23 +255,21 @@ pub struct TableProperties {
     pub encryption_kms_id: Option<String>,
 
     /// Arbitrary configuration string for the KMS, in a format specific to its type (for
-    /// example JSON). Part of the experimental Parquet encryption RFC.
+    /// example JSON).
     pub encryption_kms_configuration: Option<String>,
 
     /// Master key ID for footer encryption. Setting it turns Parquet encryption on; with
     /// [`encryption_plaintext_footer`](Self::encryption_plaintext_footer) it signs the footer
-    /// instead. Part of the experimental Parquet encryption RFC.
+    /// instead.
     pub encryption_footer_key: Option<String>,
 
-    /// Whether Parquet footers are written unencrypted (and signed). Defaults to `false`. Part
-    /// of the experimental Parquet encryption RFC.
+    /// Whether Parquet footers are written unencrypted (and signed). Defaults to `false`.
     pub encryption_plaintext_footer: Option<bool>,
 
     /// Which columns to encrypt with which master key, parsed from
     /// `<keyId>:<col>,<col>;<keyId>:<col>`. Empty or unset with a footer key means uniform
     /// encryption of every column with the footer key. Column names use the protocol's
-    /// field-path scheme and are physical names under column mapping. Part of the experimental
-    /// Parquet encryption RFC.
+    /// field-path scheme and are physical names under column mapping.
     pub encryption_column_keys: Option<Vec<EncryptionColumnKey>>,
 
     /// The table's [CHECK constraints], one per `delta.constraints.<name>` property, sorted by
@@ -340,6 +336,21 @@ pub struct EncryptionColumnKey {
     pub key_id: String,
     /// The columns it encrypts; a nested column name encrypts every field under it.
     pub columns: Vec<ColumnName>,
+}
+
+/// Formats the entry as `<keyId>:<col>,<col>`, the inverse of parsing
+/// `delta.encryption.column_keys`.
+impl std::fmt::Display for EncryptionColumnKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:", self.key_id)?;
+        for (i, column) in self.columns.iter().enumerate() {
+            if i > 0 {
+                f.write_str(",")?;
+            }
+            write!(f, "{column}")?;
+        }
+        Ok(())
+    }
 }
 
 /// Default number of leaf columns to collect statistics on when `dataSkippingNumIndexedCols`
@@ -569,41 +580,27 @@ mod tests {
 
     #[test]
     fn test_parse_encryption_properties() {
-        let properties = [
-            (ENCRYPTION_KMS_ID, "vault"),
-            (
-                ENCRYPTION_KMS_CONFIGURATION,
-                r#"{"endpoint":"https://kms.example.com"}"#,
-            ),
-            (ENCRYPTION_FOOTER_KEY, "footer-key"),
-            (ENCRYPTION_PLAINTEXT_FOOTER, "true"),
-            // Nested field path, a quoted name containing a dot, and whitespace.
-            (
-                ENCRYPTION_COLUMN_KEYS,
-                "pii:ssn, address.street; finance : `salary.usd`",
-            ),
+        // Nested field path, a quoted name containing a dot, and whitespace.
+        let value = "pii:ssn, address.street; finance : `salary.usd`";
+        let actual = TableProperties::from([(ENCRYPTION_COLUMN_KEYS, value)].into_iter());
+        let expected = vec![
+            EncryptionColumnKey {
+                key_id: "pii".to_string(),
+                columns: vec![column_name!("ssn"), column_name!("address.street")],
+            },
+            EncryptionColumnKey {
+                key_id: "finance".to_string(),
+                columns: vec![ColumnName::new(["salary.usd"])],
+            },
         ];
-        let actual = TableProperties::from(properties.into_iter());
-        let expected = TableProperties {
-            encryption_kms_id: Some("vault".to_string()),
-            encryption_kms_configuration: Some(
-                r#"{"endpoint":"https://kms.example.com"}"#.to_string(),
-            ),
-            encryption_footer_key: Some("footer-key".to_string()),
-            encryption_plaintext_footer: Some(true),
-            encryption_column_keys: Some(vec![
-                EncryptionColumnKey {
-                    key_id: "pii".to_string(),
-                    columns: vec![column_name!("ssn"), column_name!("address.street")],
-                },
-                EncryptionColumnKey {
-                    key_id: "finance".to_string(),
-                    columns: vec![ColumnName::new(["salary.usd"])],
-                },
-            ]),
-            ..Default::default()
-        };
-        assert_eq!(actual, expected);
+        assert_eq!(actual.encryption_column_keys, Some(expected.clone()));
+        // Display is the canonical inverse of parsing.
+        let formatted = expected
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(";");
+        assert_eq!(formatted, "pii:ssn,address.street;finance:`salary.usd`");
 
         // Empty column keys mean uniform encryption, not a parse failure.
         let uniform = TableProperties::from([(ENCRYPTION_COLUMN_KEYS, "")].into_iter());

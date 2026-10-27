@@ -191,12 +191,8 @@ pub(crate) enum TableFeature {
     #[serde(rename = "geospatial")]
     GeospatialType,
     /// Parquet Modular Encryption of data files, per the draft RFC delta-io/delta#6195. The
-    /// `-dev` suffix marks the feature as experimental until the RFC is standardised.
-    ///
-    /// Gated by the `parquet-encryption-in-dev` cargo feature, which supports reads and CREATE
-    /// TABLE. Data writes through kernel transactions are refused: kernel's writers do not
-    /// encrypt, and the engine's Parquet handler must handle the key metadata embedded in each
-    /// file when reading.
+    /// `-dev` suffix marks the feature as experimental until the RFC is standardised. Gated by
+    /// the `parquet-encryption-in-dev` cargo feature; see `PARQUET_ENCRYPTION_DEV_INFO`.
     #[strum(serialize = "parquetEncryption-dev")]
     #[serde(rename = "parquetEncryption-dev")]
     ParquetEncryptionDev,
@@ -737,8 +733,7 @@ static GEOSPATIAL_TYPE_INFO: FeatureInfo = FeatureInfo {
 // Kernel only carries the feature through the protocol; encrypting and decrypting data files is
 // the engine's responsibility. Reads are allowed because an engine that cannot decrypt fails on
 // the files rather than leaking anything; writes are refused because kernel's default writer
-// would add plaintext files and statistics. Gated until the RFC (delta-io/delta#6195) is
-// standardised.
+// would add plaintext files and statistics.
 static PARQUET_ENCRYPTION_DEV_INFO: FeatureInfo = FeatureInfo {
     feature_type: FeatureType::ReaderWriter,
     min_legacy_version: None,
@@ -755,7 +750,7 @@ static PARQUET_ENCRYPTION_DEV_INFO: FeatureInfo = FeatureInfo {
     kernel_support: KernelSupport::NotSupported,
     // Per the RFC the feature is active whenever it is in the protocol, with or without
     // `delta.encryption.*` properties (encryption may have been turned off). CREATE TABLE adds it
-    // when any property is set; see `maybe_enable_parquet_encryption`.
+    // when any property is set; see `validate_encryption_properties`.
     enablement_check: EnablementCheck::AlwaysIfSupported,
 };
 
