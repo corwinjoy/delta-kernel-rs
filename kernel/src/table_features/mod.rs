@@ -190,6 +190,14 @@ pub(crate) enum TableFeature {
     #[strum(serialize = "geospatial")]
     #[serde(rename = "geospatial")]
     GeospatialType,
+    /// Parquet Modular Encryption of data files, per the draft RFC delta-io/delta#6195. The
+    /// `-dev` suffix marks the feature as experimental until the RFC is standardised.
+    ///
+    /// Gated by the `parquet-encryption-in-dev` cargo feature. Kernel itself does not encrypt or
+    /// decrypt: the engine's Parquet handler must handle the key metadata embedded in each file.
+    #[strum(serialize = "parquetEncryption-dev")]
+    #[serde(rename = "parquetEncryption-dev")]
+    ParquetEncryptionDev,
 
     #[serde(untagged)]
     #[strum(default)]
@@ -724,6 +732,19 @@ static GEOSPATIAL_TYPE_INFO: FeatureInfo = FeatureInfo {
     enablement_check: EnablementCheck::AlwaysIfSupported,
 };
 
+// Kernel only carries the feature through the protocol; encrypting and decrypting data files is
+// the engine's responsibility. Gated until the RFC (delta-io/delta#6195) is standardised.
+static PARQUET_ENCRYPTION_DEV_INFO: FeatureInfo = FeatureInfo {
+    feature_type: FeatureType::ReaderWriter,
+    min_legacy_version: None,
+    feature_requirements: &[],
+    #[cfg(feature = "parquet-encryption-in-dev")]
+    kernel_support: KernelSupport::Supported,
+    #[cfg(not(feature = "parquet-encryption-in-dev"))]
+    kernel_support: KernelSupport::NotSupported,
+    enablement_check: EnablementCheck::AlwaysIfSupported,
+};
+
 /// By definition, kernel cannot know how to handle unknown features and must assume they're always
 /// enabled if supported in protocol. However, the read path ignores all writer-only features,
 /// including unknown ones. Unknown features are never inferred from legacy protocol versions.
@@ -757,7 +778,8 @@ impl TableFeature {
             | TableFeature::VariantShredding
             | TableFeature::VariantShreddingPreview
             | TableFeature::AdaptiveMetadataPreview
-            | TableFeature::GeospatialType => FeatureType::ReaderWriter,
+            | TableFeature::GeospatialType
+            | TableFeature::ParquetEncryptionDev => FeatureType::ReaderWriter,
             TableFeature::AppendOnly
             | TableFeature::DomainMetadata
             | TableFeature::Invariants
@@ -828,6 +850,7 @@ impl TableFeature {
             TableFeature::VariantShreddingPreview => &VARIANT_SHREDDING_PREVIEW_INFO,
             TableFeature::AdaptiveMetadataPreview => &ADAPTIVE_METADATA_PREVIEW_INFO,
             TableFeature::GeospatialType => &GEOSPATIAL_TYPE_INFO,
+            TableFeature::ParquetEncryptionDev => &PARQUET_ENCRYPTION_DEV_INFO,
 
             // Unknown features: not supported by kernel, no legacy version inference.
             TableFeature::Unknown(_) => &UNKNOWN_FEATURE_INFO,
@@ -1113,6 +1136,28 @@ mod tests {
             ExpectRead::Unsupported
         )
     )]
+    #[cfg_attr(
+        feature = "parquet-encryption-in-dev",
+        case::parquet_encryption_supported(
+            Protocol::try_new_modern(
+                [TableFeature::ParquetEncryptionDev],
+                [TableFeature::ParquetEncryptionDev],
+            )
+            .unwrap(),
+            ExpectRead::Ok
+        )
+    )]
+    #[cfg_attr(
+        not(feature = "parquet-encryption-in-dev"),
+        case::parquet_encryption_gated_off(
+            Protocol::try_new_modern(
+                [TableFeature::ParquetEncryptionDev],
+                [TableFeature::ParquetEncryptionDev],
+            )
+            .unwrap(),
+            ExpectRead::Unsupported
+        )
+    )]
     fn validate_protocol_for_read(#[case] protocol: Protocol, #[case] expected: ExpectRead) {
         let result = ensure_table_can_be_read(&protocol);
         match expected {
@@ -1199,6 +1244,7 @@ mod tests {
                 TableFeature::AdaptiveMetadataPreview => "adaptiveMetadata-preview",
                 TableFeature::AllowColumnDefaults => "allowColumnDefaults",
                 TableFeature::GeospatialType => "geospatial",
+                TableFeature::ParquetEncryptionDev => "parquetEncryption-dev",
                 TableFeature::Unknown(_) => continue, // tested in test_unknown_features
             };
 
