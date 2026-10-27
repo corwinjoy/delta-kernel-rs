@@ -68,6 +68,8 @@ pub(crate) const IN_COMMIT_TIMESTAMP_ENABLEMENT_TIMESTAMP: &str =
     "delta.inCommitTimestampEnablementTimestamp";
 pub(crate) const CHECK_CONSTRAINT_PREFIX: &str = "delta.constraints.";
 // Parquet Modular Encryption, draft RFC delta-io/delta#6195 (`parquetEncryption-dev`).
+#[cfg(feature = "parquet-encryption-in-dev")]
+pub(crate) const ENCRYPTION_PROPERTY_PREFIX: &str = "delta.encryption.";
 pub(crate) const ENCRYPTION_KMS_ID: &str = "delta.encryption.kms_id";
 pub(crate) const ENCRYPTION_KMS_CONFIGURATION: &str = "delta.encryption.kms_configuration";
 pub(crate) const ENCRYPTION_FOOTER_KEY: &str = "delta.encryption.footer_key";
@@ -328,16 +330,6 @@ impl TableProperties {
     pub fn compression_codec_or_default(&self) -> ParquetCompressionCodec {
         self.parquet_compression_codec
             .unwrap_or(ParquetCompressionCodec::Zstd)
-    }
-
-    /// Whether any `delta.encryption.*` property is set. The Parquet encryption RFC requires
-    /// the `parquetEncryption-dev` table feature whenever one is, valid or not.
-    pub fn has_encryption_properties(&self) -> bool {
-        self.encryption_kms_id.is_some()
-            || self.encryption_kms_configuration.is_some()
-            || self.encryption_footer_key.is_some()
-            || self.encryption_plaintext_footer.is_some()
-            || self.encryption_column_keys.is_some()
     }
 }
 
@@ -612,8 +604,6 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(actual, expected);
-        assert!(actual.has_encryption_properties());
-        assert!(!TableProperties::default().has_encryption_properties());
 
         // Empty column keys mean uniform encryption, not a parse failure.
         let uniform = TableProperties::from([(ENCRYPTION_COLUMN_KEYS, "")].into_iter());

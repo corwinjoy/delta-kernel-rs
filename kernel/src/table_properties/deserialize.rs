@@ -164,9 +164,11 @@ pub(crate) fn parse_column_names(s: &str) -> Option<Vec<ColumnName>> {
 
 /// Deserialize `delta.encryption.column_keys` (`<keyId>:<col>,<col>;<keyId>:<col>`) into one
 /// entry per master key. Column names follow the protocol's field-path scheme, so `a.b` is a
-/// nested field and a name containing a dot is backtick-quoted. An empty string is `Some(vec![])`
-/// (uniform encryption); a segment without a key ID, without columns, or with an unparsable
-/// column list makes the whole value `None`.
+/// nested field and a name containing a dot is backtick-quoted. The value is split on `;` and the
+/// first `:` of each segment before the quoting is read, so a quoted name may not contain `;`
+/// and a key ID may not contain `:`. An empty string is `Some(vec![])` (uniform encryption); a
+/// segment without a key ID, without columns, or with an unparsable column list makes the whole
+/// value `None`.
 pub(crate) fn parse_encryption_column_keys(s: &str) -> Option<Vec<EncryptionColumnKey>> {
     s.split(';')
         .map(str::trim)

@@ -51,7 +51,7 @@ use crate::table_properties::{
 #[cfg(feature = "parquet-encryption-in-dev")]
 use crate::table_properties::{
     ENCRYPTION_COLUMN_KEYS, ENCRYPTION_FOOTER_KEY, ENCRYPTION_KMS_CONFIGURATION, ENCRYPTION_KMS_ID,
-    ENCRYPTION_PLAINTEXT_FOOTER,
+    ENCRYPTION_PLAINTEXT_FOOTER, ENCRYPTION_PROPERTY_PREFIX,
 };
 use crate::transaction::create_table::CreateTableTransaction;
 use crate::transaction::data_layout::DataLayout;
@@ -105,8 +105,9 @@ const ALLOWED_DELTA_FEATURES: &[TableFeature] = &[
     // Dependent features (ColumnMapping, RowTracking, DomainMetadata) are auto-added during
     // create table.
     TableFeature::IcebergCompatV3,
-    // Parquet encryption (experimental): auto-enabled when any `delta.encryption.*` property is
-    // set, or explicitly via `delta.feature.parquetEncryption-dev=supported`.
+    // Parquet encryption (experimental): enabled by `maybe_enable_parquet_encryption` when any
+    // `delta.encryption.*` property is set, or explicitly via
+    // `delta.feature.parquetEncryption-dev=supported`.
     #[cfg(feature = "parquet-encryption-in-dev")]
     TableFeature::ParquetEncryptionDev,
 ];
@@ -514,6 +515,24 @@ fn maybe_enable_ict_for_catalog_managed(
     Ok(())
 }
 
+/// Adds `parquetEncryption-dev` when any `delta.encryption.*` property is set, as the RFC
+/// requires. Values were already checked to parse by
+/// `validate_extract_table_features_and_properties`.
+#[cfg(feature = "parquet-encryption-in-dev")]
+fn maybe_enable_parquet_encryption(validated: &mut ValidatedTableProperties) {
+    if validated
+        .properties
+        .keys()
+        .any(|key| key.starts_with(ENCRYPTION_PROPERTY_PREFIX))
+    {
+        add_feature_to_lists(
+            TableFeature::ParquetEncryptionDev,
+            &mut validated.reader_features,
+            &mut validated.writer_features,
+        );
+    }
+}
+
 fn maybe_enable_v2_checkpoint_for_policy(validated: &mut ValidatedTableProperties) {
     let is_v2_policy = validated
         .properties
@@ -798,6 +817,20 @@ fn validate_extract_table_features_and_properties(
         }
     }
 
+    // A `delta.encryption.*` value that does not parse would be stored verbatim yet never reach
+    // `TableProperties::encryption_*`, so refuse it rather than create a misconfigured table.
+    #[cfg(feature = "parquet-encryption-in-dev")]
+    if let Some(key) = TableProperties::from(properties.iter())
+        .unknown_properties
+        .keys()
+        .find(|key| key.starts_with(ENCRYPTION_PROPERTY_PREFIX))
+    {
+        return Err(KernelError::generic(format!(
+            "Property '{key}' has an invalid value: {}",
+            properties[key]
+        )));
+    }
+
     Ok(ValidatedTableProperties {
         properties,
         reader_features,
@@ -1055,6 +1088,10 @@ impl TransactionBuilder<CreateTable> {
         // Auto-enable v2Checkpoint when checkpointPolicy=v2
         maybe_enable_v2_checkpoint_for_policy(&mut validated);
 
+        // Auto-enable parquetEncryption-dev when any delta.encryption.* property is set
+        #[cfg(feature = "parquet-encryption-in-dev")]
+        maybe_enable_parquet_encryption(&mut validated);
+
         // Set materialized row tracking column names when row tracking is enabled.
         maybe_set_materialized_row_tracking_column_name_properties(&mut validated);
 
@@ -1155,6 +1192,8 @@ mod tests {
         schema, schema_ref, try_schema, ColumnMetadataKey, DataType, MetadataValue, StructField,
     };
     use crate::table_features::FeatureType;
+    #[cfg(not(feature = "parquet-encryption-in-dev"))]
+    use crate::table_properties::ENCRYPTION_FOOTER_KEY;
     use crate::table_properties::{
         COLUMN_MAPPING_MAX_COLUMN_ID, ENABLE_ICEBERG_COMPAT_V1, ENABLE_ICEBERG_COMPAT_V2,
         ENABLE_ICEBERG_COMPAT_V3, PARQUET_FORMAT_VERSION,
@@ -1539,7 +1578,7 @@ mod tests {
             (ENCRYPTION_COLUMN_KEYS.to_string(), "pii:ssn".to_string()),
         ]);
         let mut validated = validate_extract_table_features_and_properties(properties).unwrap();
-        maybe_auto_enable_property_driven_features(&mut validated);
+        maybe_enable_parquet_encryption(&mut validated);
         assert_eq!(validated.properties.len(), 5);
         assert_eq!(
             validated.reader_features,
@@ -1549,6 +1588,26 @@ mod tests {
             validated.writer_features,
             vec![TableFeature::ParquetEncryptionDev]
         );
+
+        // No encryption property: nothing is enabled.
+        let mut validated = validate_extract_table_features_and_properties(HashMap::new()).unwrap();
+        maybe_enable_parquet_encryption(&mut validated);
+        assert!(validated.reader_features.is_empty());
+    }
+
+    /// A `delta.encryption.*` value that does not parse is refused rather than stored verbatim
+    /// without the feature.
+    #[cfg(feature = "parquet-encryption-in-dev")]
+    #[rstest]
+    #[case::plaintext_footer(ENCRYPTION_PLAINTEXT_FOOTER, "yes")]
+    #[case::column_keys_no_key_id(ENCRYPTION_COLUMN_KEYS, "pii")]
+    #[case::column_keys_unterminated_quote(ENCRYPTION_COLUMN_KEYS, "pii:`ssn")]
+    fn test_invalid_encryption_value_rejected(#[case] key: &str, #[case] value: &str) {
+        let properties = HashMap::from([(key.to_string(), value.to_string())]);
+        assert_result_error_with_message(
+            validate_extract_table_features_and_properties(properties),
+            &format!("Property '{key}' has an invalid value: {value}"),
+        );
     }
 
     /// Without the cargo feature, kernel cannot carry `parquetEncryption-dev`, so it refuses to
@@ -1556,7 +1615,6 @@ mod tests {
     #[cfg(not(feature = "parquet-encryption-in-dev"))]
     #[test]
     fn test_encryption_properties_rejected_without_feature() {
-        use crate::table_properties::ENCRYPTION_FOOTER_KEY;
         let properties =
             HashMap::from([(ENCRYPTION_FOOTER_KEY.to_string(), "footer-key".to_string())]);
         assert_result_error_with_message(

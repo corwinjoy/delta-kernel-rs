@@ -753,9 +753,10 @@ static PARQUET_ENCRYPTION_DEV_INFO: FeatureInfo = FeatureInfo {
     }),
     #[cfg(not(feature = "parquet-encryption-in-dev"))]
     kernel_support: KernelSupport::NotSupported,
-    // The RFC requires the feature whenever any `delta.encryption.*` property is set, so CREATE
-    // TABLE adds it from the properties; the table may also carry the feature with no properties.
-    enablement_check: EnablementCheck::EnabledIf(TableProperties::has_encryption_properties),
+    // Per the RFC the feature is active whenever it is in the protocol, with or without
+    // `delta.encryption.*` properties (encryption may have been turned off). CREATE TABLE adds it
+    // when any property is set; see `maybe_enable_parquet_encryption`.
+    enablement_check: EnablementCheck::AlwaysIfSupported,
 };
 
 /// By definition, kernel cannot know how to handle unknown features and must assume they're always
