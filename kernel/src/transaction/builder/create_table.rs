@@ -48,6 +48,11 @@ use crate::table_properties::{
     MATERIALIZED_ROW_ID_COLUMN_NAME, PARQUET_FORMAT_VERSION, ROW_TRACKING_SUSPENDED,
     SET_TRANSACTION_RETENTION_DURATION,
 };
+#[cfg(feature = "parquet-encryption-in-dev")]
+use crate::table_properties::{
+    ENCRYPTION_COLUMN_KEYS, ENCRYPTION_FOOTER_KEY, ENCRYPTION_KMS_CONFIGURATION, ENCRYPTION_KMS_ID,
+    ENCRYPTION_PLAINTEXT_FOOTER,
+};
 use crate::transaction::create_table::CreateTableTransaction;
 use crate::transaction::data_layout::DataLayout;
 use crate::transaction::{CommitOperation, CreateTable, ExecutionMode, Transaction};
@@ -100,6 +105,10 @@ const ALLOWED_DELTA_FEATURES: &[TableFeature] = &[
     // Dependent features (ColumnMapping, RowTracking, DomainMetadata) are auto-added during
     // create table.
     TableFeature::IcebergCompatV3,
+    // Parquet encryption (experimental): auto-enabled when any `delta.encryption.*` property is
+    // set, or explicitly via `delta.feature.parquetEncryption-dev=supported`.
+    #[cfg(feature = "parquet-encryption-in-dev")]
+    TableFeature::ParquetEncryptionDev,
 ];
 
 /// The single allow-list of `delta.*` properties accepted during CREATE TABLE. Any `delta.*`
@@ -139,6 +148,18 @@ const ALLOWED_DELTA_PROPERTIES: &[&str] = &[
     CHECKPOINT_INTERVAL,
     // Checkpoint policy: "v2" auto-enables the v2Checkpoint feature.
     CHECKPOINT_POLICY,
+    // Parquet encryption configuration (experimental): setting any of these enables the
+    // `parquetEncryption-dev` feature, so they are only accepted when kernel can carry it.
+    #[cfg(feature = "parquet-encryption-in-dev")]
+    ENCRYPTION_KMS_ID,
+    #[cfg(feature = "parquet-encryption-in-dev")]
+    ENCRYPTION_KMS_CONFIGURATION,
+    #[cfg(feature = "parquet-encryption-in-dev")]
+    ENCRYPTION_FOOTER_KEY,
+    #[cfg(feature = "parquet-encryption-in-dev")]
+    ENCRYPTION_PLAINTEXT_FOOTER,
+    #[cfg(feature = "parquet-encryption-in-dev")]
+    ENCRYPTION_COLUMN_KEYS,
 ];
 
 /// Ensures that no Delta table exists at the given path.
@@ -1505,6 +1526,53 @@ mod tests {
         assert!(validated.properties.contains_key(CHECKPOINT_POLICY));
     }
 
+    /// Any `delta.encryption.*` property at CREATE TABLE enables `parquetEncryption-dev` in both
+    /// feature lists, as the RFC requires, when kernel can carry the feature.
+    #[cfg(feature = "parquet-encryption-in-dev")]
+    #[test]
+    fn test_encryption_properties_enable_feature() {
+        let properties = HashMap::from([
+            (ENCRYPTION_KMS_ID.to_string(), "vault".to_string()),
+            (ENCRYPTION_KMS_CONFIGURATION.to_string(), "{}".to_string()),
+            (ENCRYPTION_FOOTER_KEY.to_string(), "footer-key".to_string()),
+            (ENCRYPTION_PLAINTEXT_FOOTER.to_string(), "false".to_string()),
+            (ENCRYPTION_COLUMN_KEYS.to_string(), "pii:ssn".to_string()),
+        ]);
+        let mut validated = validate_extract_table_features_and_properties(properties).unwrap();
+        maybe_auto_enable_property_driven_features(&mut validated);
+        assert_eq!(validated.properties.len(), 5);
+        assert_eq!(
+            validated.reader_features,
+            vec![TableFeature::ParquetEncryptionDev]
+        );
+        assert_eq!(
+            validated.writer_features,
+            vec![TableFeature::ParquetEncryptionDev]
+        );
+    }
+
+    /// Without the cargo feature, kernel cannot carry `parquetEncryption-dev`, so it refuses to
+    /// create a table that would need it rather than create one without the feature.
+    #[cfg(not(feature = "parquet-encryption-in-dev"))]
+    #[test]
+    fn test_encryption_properties_rejected_without_feature() {
+        use crate::table_properties::ENCRYPTION_FOOTER_KEY;
+        let properties =
+            HashMap::from([(ENCRYPTION_FOOTER_KEY.to_string(), "footer-key".to_string())]);
+        assert_result_error_with_message(
+            validate_extract_table_features_and_properties(properties),
+            "Setting delta property 'delta.encryption.footer_key' is not supported",
+        );
+        let properties = HashMap::from([(
+            "delta.feature.parquetEncryption-dev".to_string(),
+            "supported".to_string(),
+        )]);
+        assert_result_error_with_message(
+            validate_extract_table_features_and_properties(properties),
+            "Enabling feature 'parquetEncryption-dev' via 'delta.feature.parquetEncryption-dev' is not supported",
+        );
+    }
+
     #[test]
     fn test_validate_unsupported_properties() {
         // Delta properties not on allow list are rejected
@@ -1841,6 +1909,10 @@ mod tests {
     #[case::variant_shredding(TableFeature::VariantShredding, "variantShredding")]
     #[case::catalog_managed(TableFeature::CatalogManaged, "catalogManaged")]
     #[case::invariants(TableFeature::Invariants, "invariants")]
+    #[cfg_attr(
+        feature = "parquet-encryption-in-dev",
+        case::parquet_encryption(TableFeature::ParquetEncryptionDev, "parquetEncryption-dev")
+    )]
     fn test_feature_signal_accepted(#[case] feature: TableFeature, #[case] feature_name: &str) {
         let key = format!("delta.feature.{feature_name}");
         let properties = HashMap::from([(key, "supported".to_string())]);
