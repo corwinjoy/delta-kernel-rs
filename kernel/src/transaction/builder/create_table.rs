@@ -565,6 +565,7 @@ fn validate_encryption_properties(
     let mut physical_keys = Vec::with_capacity(column_keys.len());
     for key in &column_keys {
         let mut physical_columns = Vec::with_capacity(key.columns.len());
+        // Case-insensitive column matching, as for partition and clustering columns.
         for column in normalize_column_names_to_schema_casing(schema, &key.columns) {
             if let Some(other) = seen.iter().find(|other| {
                 column.path().starts_with(other.path()) || other.path().starts_with(column.path())
