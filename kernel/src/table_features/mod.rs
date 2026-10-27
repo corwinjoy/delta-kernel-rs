@@ -738,6 +738,12 @@ static PARQUET_ENCRYPTION_DEV_INFO: FeatureInfo = FeatureInfo {
     feature_type: FeatureType::ReaderWriter,
     min_legacy_version: None,
     feature_requirements: &[],
+    // Refusing `Operation::Write` blocks every path that adds data files: update-table
+    // transactions check it when they are created, and `Transaction::validate_for_data_write`
+    // checks it for `write_state()` and for commits that stage Add actions, which covers CREATE
+    // TABLE AS SELECT. A metadata-only CREATE TABLE writes no data files and never runs the
+    // write check, so an engine can still create an encrypted table through kernel and then
+    // write encrypted files with its own writer.
     #[cfg(feature = "parquet-encryption-in-dev")]
     kernel_support: KernelSupport::Custom(|_, _, op| match op {
         Operation::SnapshotLoad | Operation::Scan | Operation::Cdf => Ok(()),
