@@ -533,6 +533,70 @@ fn maybe_enable_parquet_encryption(validated: &mut ValidatedTableProperties) {
     }
 }
 
+/// Applies the Parquet encryption RFC's writer rules to `delta.encryption.column_keys`: column
+/// keys need a footer key, every column must be in the schema, no column may be listed twice or
+/// under a listed ancestor, and partition columns cannot be encrypted. Columns are given as
+/// logical names, since physical names are only assigned here; the property is rewritten to the
+/// physical names the RFC requires under column mapping.
+#[cfg(feature = "parquet-encryption-in-dev")]
+fn validate_encryption_properties(
+    schema: &StructType,
+    column_mapping_mode: ColumnMappingMode,
+    partition_columns: &[ColumnName],
+    validated: &mut ValidatedTableProperties,
+) -> KernelResult<()> {
+    let properties = TableProperties::from(validated.properties.iter());
+    let Some(column_keys) = properties.encryption_column_keys else {
+        return Ok(());
+    };
+    if column_keys.is_empty() {
+        return Ok(());
+    }
+    if properties.encryption_footer_key.is_none() {
+        return Err(KernelError::generic(format!(
+            "'{ENCRYPTION_COLUMN_KEYS}' requires '{ENCRYPTION_FOOTER_KEY}' to be set"
+        )));
+    }
+    let mut seen: Vec<&ColumnName> = Vec::new();
+    let mut physical_keys = Vec::with_capacity(column_keys.len());
+    for key in &column_keys {
+        let mut physical_columns = Vec::with_capacity(key.columns.len());
+        for column in &key.columns {
+            if let Some(other) = seen.iter().find(|other| {
+                column.path().starts_with(other.path()) || other.path().starts_with(column.path())
+            }) {
+                return Err(KernelError::generic(format!(
+                    "'{ENCRYPTION_COLUMN_KEYS}' lists column '{column}' more than once or \
+                     alongside its ancestor or descendant '{other}'"
+                )));
+            }
+            if partition_columns
+                .iter()
+                .any(|partition| partition.path()[0] == column.path()[0])
+            {
+                return Err(KernelError::generic(format!(
+                    "'{ENCRYPTION_COLUMN_KEYS}' names partition column '{column}'; partition \
+                     columns cannot be encrypted"
+                )));
+            }
+            let physical = get_any_level_column_physical_name(schema, column, column_mapping_mode)
+                .map_err(|_| {
+                    KernelError::generic(format!(
+                        "'{ENCRYPTION_COLUMN_KEYS}' names column '{column}', which is not in the \
+                         schema"
+                    ))
+                })?;
+            seen.push(column);
+            physical_columns.push(physical.to_string());
+        }
+        physical_keys.push(format!("{}:{}", key.key_id, physical_columns.join(",")));
+    }
+    validated
+        .properties
+        .insert(ENCRYPTION_COLUMN_KEYS.to_string(), physical_keys.join(";"));
+    Ok(())
+}
+
 fn maybe_enable_v2_checkpoint_for_policy(validated: &mut ValidatedTableProperties) {
     let is_v2_policy = validated
         .properties
@@ -1088,9 +1152,21 @@ impl TransactionBuilder<CreateTable> {
         // Auto-enable v2Checkpoint when checkpointPolicy=v2
         maybe_enable_v2_checkpoint_for_policy(&mut validated);
 
-        // Auto-enable parquetEncryption-dev when any delta.encryption.* property is set
+        // Auto-enable parquetEncryption-dev when any delta.encryption.* property is set, and
+        // apply the RFC's rules for column keys against the schema and partition columns.
         #[cfg(feature = "parquet-encryption-in-dev")]
-        maybe_enable_parquet_encryption(&mut validated);
+        {
+            maybe_enable_parquet_encryption(&mut validated);
+            validate_encryption_properties(
+                &effective_schema,
+                column_mapping_mode,
+                data_layout_result
+                    .partition_columns
+                    .as_deref()
+                    .unwrap_or_default(),
+                &mut validated,
+            )?;
+        }
 
         // Set materialized row tracking column names when row tracking is enabled.
         maybe_set_materialized_row_tracking_column_name_properties(&mut validated);
@@ -1608,6 +1684,114 @@ mod tests {
             validate_extract_table_features_and_properties(properties),
             &format!("Property '{key}' has an invalid value: {value}"),
         );
+    }
+
+    /// Each RFC writer rule for `delta.encryption.column_keys` is enforced at CREATE TABLE.
+    #[cfg(feature = "parquet-encryption-in-dev")]
+    #[rstest]
+    #[case::no_footer_key(
+        &[(ENCRYPTION_COLUMN_KEYS, "k:ssn")],
+        "requires 'delta.encryption.footer_key'"
+    )]
+    #[case::unknown_column(
+        &[(ENCRYPTION_FOOTER_KEY, "fk"), (ENCRYPTION_COLUMN_KEYS, "k:nope")],
+        "names column 'nope', which is not in the schema"
+    )]
+    #[case::unknown_nested_column(
+        &[(ENCRYPTION_FOOTER_KEY, "fk"), (ENCRYPTION_COLUMN_KEYS, "k:address.zip")],
+        "names column 'address.zip', which is not in the schema"
+    )]
+    #[case::duplicate_column(
+        &[(ENCRYPTION_FOOTER_KEY, "fk"), (ENCRYPTION_COLUMN_KEYS, "k1:ssn;k2:ssn")],
+        "lists column 'ssn' more than once"
+    )]
+    #[case::nested_under_ancestor(
+        &[(ENCRYPTION_FOOTER_KEY, "fk"), (ENCRYPTION_COLUMN_KEYS, "k1:address;k2:address.city")],
+        "lists column 'address.city' more than once or alongside its ancestor or descendant 'address'"
+    )]
+    #[case::ancestor_after_nested(
+        &[(ENCRYPTION_FOOTER_KEY, "fk"), (ENCRYPTION_COLUMN_KEYS, "k1:address.city;k2:address")],
+        "lists column 'address' more than once or alongside its ancestor or descendant 'address.city'"
+    )]
+    #[case::partition_column(
+        &[(ENCRYPTION_FOOTER_KEY, "fk"), (ENCRYPTION_COLUMN_KEYS, "k:region")],
+        "names partition column 'region'"
+    )]
+    fn test_encryption_column_keys_rules_rejected(
+        #[case] properties: &[(&str, &str)],
+        #[case] expected: &str,
+    ) {
+        let schema = schema! {
+            not_null "id": INTEGER,
+            nullable "ssn": STRING,
+            nullable "region": STRING,
+            nullable "address": { nullable "city": STRING },
+        };
+        let properties = properties
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let mut validated = validate_extract_table_features_and_properties(properties).unwrap();
+        assert_result_error_with_message(
+            validate_encryption_properties(
+                &schema,
+                ColumnMappingMode::None,
+                &[column_name!("region")],
+                &mut validated,
+            ),
+            expected,
+        );
+    }
+
+    /// Valid column keys pass, and under column mapping they are stored as physical names, as
+    /// the RFC requires, while the user supplies logical names.
+    #[cfg(feature = "parquet-encryption-in-dev")]
+    #[rstest]
+    #[case::no_column_mapping(ColumnMappingMode::None)]
+    #[case::column_mapping_name(ColumnMappingMode::Name)]
+    fn test_encryption_column_keys_stored_as_physical_names(#[case] mode: ColumnMappingMode) {
+        let schema = Arc::new(schema! {
+            not_null "id": INTEGER,
+            nullable "ssn": STRING,
+            nullable "address": { nullable "city": STRING, nullable "street": STRING },
+        });
+        let mut properties = HashMap::from([
+            (ENCRYPTION_FOOTER_KEY.to_string(), "fk".to_string()),
+            (
+                ENCRYPTION_COLUMN_KEYS.to_string(),
+                "pii:ssn,address.city;geo:address.street".to_string(),
+            ),
+        ]);
+        if mode != ColumnMappingMode::None {
+            properties.insert(COLUMN_MAPPING_MODE.to_string(), "name".to_string());
+        }
+        let mut validated = validate_extract_table_features_and_properties(properties).unwrap();
+        let (effective_schema, effective_mode) =
+            maybe_apply_column_mapping_for_table_create(&schema, &mut validated).unwrap();
+        assert_eq!(effective_mode, mode);
+        validate_encryption_properties(&effective_schema, mode, &[], &mut validated).unwrap();
+
+        let physical = |logical: &str| {
+            get_any_level_column_physical_name(
+                &effective_schema,
+                &ColumnName::new(logical.split('.')),
+                mode,
+            )
+            .unwrap()
+            .to_string()
+        };
+        let expected = format!(
+            "pii:{},{};geo:{}",
+            physical("ssn"),
+            physical("address.city"),
+            physical("address.street")
+        );
+        assert_eq!(validated.properties[ENCRYPTION_COLUMN_KEYS], expected);
+        if mode == ColumnMappingMode::None {
+            assert_eq!(expected, "pii:ssn,address.city;geo:address.street");
+        } else {
+            assert!(expected.contains("col-"), "{expected}");
+        }
     }
 
     /// Without the cargo feature, kernel cannot carry `parquetEncryption-dev`, so it refuses to
