@@ -193,8 +193,10 @@ pub(crate) enum TableFeature {
     /// Parquet Modular Encryption of data files, per the draft RFC delta-io/delta#6195. The
     /// `-dev` suffix marks the feature as experimental until the RFC is standardised.
     ///
-    /// Gated by the `parquet-encryption-in-dev` cargo feature. Kernel itself does not encrypt or
-    /// decrypt: the engine's Parquet handler must handle the key metadata embedded in each file.
+    /// Gated by the `parquet-encryption-in-dev` cargo feature, which supports reads and CREATE
+    /// TABLE. Data writes through kernel transactions are refused: kernel's writers do not
+    /// encrypt, and the engine's Parquet handler must handle the key metadata embedded in each
+    /// file when reading.
     #[strum(serialize = "parquetEncryption-dev")]
     #[serde(rename = "parquetEncryption-dev")]
     ParquetEncryptionDev,
@@ -733,13 +735,22 @@ static GEOSPATIAL_TYPE_INFO: FeatureInfo = FeatureInfo {
 };
 
 // Kernel only carries the feature through the protocol; encrypting and decrypting data files is
-// the engine's responsibility. Gated until the RFC (delta-io/delta#6195) is standardised.
+// the engine's responsibility. Reads are allowed because an engine that cannot decrypt fails on
+// the files rather than leaking anything; writes are refused because kernel's default writer
+// would add plaintext files and statistics. Gated until the RFC (delta-io/delta#6195) is
+// standardised.
 static PARQUET_ENCRYPTION_DEV_INFO: FeatureInfo = FeatureInfo {
     feature_type: FeatureType::ReaderWriter,
     min_legacy_version: None,
     feature_requirements: &[],
     #[cfg(feature = "parquet-encryption-in-dev")]
-    kernel_support: KernelSupport::Supported,
+    kernel_support: KernelSupport::Custom(|_, _, op| match op {
+        Operation::SnapshotLoad | Operation::Scan | Operation::Cdf => Ok(()),
+        Operation::Write => Err(KernelError::unsupported(
+            "Feature 'parquetEncryption-dev' is not supported for writes: kernel's writers do \
+             not encrypt data files",
+        )),
+    }),
     #[cfg(not(feature = "parquet-encryption-in-dev"))]
     kernel_support: KernelSupport::NotSupported,
     // The RFC requires the feature whenever any `delta.encryption.*` property is set, so CREATE

@@ -100,11 +100,12 @@ Some noteworthy ones (see `[features]` in `kernel/Cargo.toml` for the full list)
   cargo feature off, any table listing it is rejected; with it on, scans and CDF are supported
   but writes are still blocked.
 - `parquet-encryption-in-dev`: Parquet Modular Encryption (draft RFC, experimental). Gates
-  `KernelSupport::Supported` for the `parquetEncryption-dev` reader+writer feature. Without it,
-  any table listing the feature is rejected, and CREATE TABLE refuses the `delta.encryption.*`
-  properties (which would require the feature). The properties themselves always parse into
-  `TableProperties::encryption_*`. Kernel never encrypts or decrypts data files; the engine's
-  Parquet handler must.
+  `KernelSupport` for the `parquetEncryption-dev` reader+writer feature: with the cargo feature
+  off, any table listing it is rejected and CREATE TABLE refuses the `delta.encryption.*`
+  properties (which would require the feature); with it on, snapshot loads, scans, CDF and
+  CREATE TABLE are supported but data writes through kernel transactions are refused, since
+  kernel's writers do not encrypt. The properties always parse into
+  `TableProperties::encryption_*`. Encrypting and decrypting data files is the engine's job.
 - `internal-api`: unstable APIs like `parallel_scan_metadata`. Items are marked with the
   `#[internal_api]` proc macro attribute.
 - `declarative-plans`: experimental declarative-plan IR (`kernel/src/plans/`) and the prost

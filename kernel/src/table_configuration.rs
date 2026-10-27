@@ -2330,6 +2330,22 @@ mod test {
                 r#"Feature 'geospatial' is not supported for writes"#,
             );
         }
+
+        #[cfg(feature = "parquet-encryption-in-dev")]
+        {
+            let config = MockTableConfigurationBuilder::new()
+                .with_protocol(
+                    MockProtocolBuilder::new()
+                        .with_features([TableFeature::ParquetEncryptionDev])
+                        .build(),
+                )
+                .build();
+            assert!(config.ensure_operation_supported(Operation::Scan).is_ok());
+            assert_result_error_with_message(
+                config.ensure_operation_supported(Operation::Write),
+                r#"Feature 'parquetEncryption-dev' is not supported for writes"#,
+            );
+        }
     }
 
     #[cfg(not(feature = "geo-type-in-dev"))]
