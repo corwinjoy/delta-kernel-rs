@@ -542,12 +542,14 @@ fn maybe_enable_parquet_encryption(
     schema: &StructType,
     column_mapping_mode: ColumnMappingMode,
     partition_columns: &[ColumnName],
+    clustering_columns: &[ColumnName],
     validated: &mut ValidatedTableProperties,
 ) -> DeltaResult<()> {
     if validate_encryption_properties(
         schema,
         column_mapping_mode,
         partition_columns,
+        clustering_columns,
         &mut validated.properties,
     )? {
         add_feature_to_lists(
@@ -561,8 +563,9 @@ fn maybe_enable_parquet_encryption(
 
 /// Applies the Parquet encryption RFC's CREATE TABLE rules to `properties`: values must parse;
 /// column keys need a footer key, every column must be in the schema, no column may be listed
-/// twice or under a listed ancestor, and partition columns cannot be encrypted. Columns are
-/// given as logical names, since physical names are only assigned at create; the property is
+/// twice or under a listed ancestor, and partition and clustering columns cannot be encrypted
+/// (clustering columns need statistics, which encrypted columns cannot have, so a clustered table
+/// cannot use uniform encryption either). Columns are given as logical names, since physical names are only assigned at create; the property is
 /// rewritten to the physical names the RFC requires under column mapping.
 ///
 /// Returns whether any `delta.encryption.*` property is set, in which case the table's protocol
@@ -574,6 +577,7 @@ pub(crate) fn validate_encryption_properties(
     schema: &StructType,
     column_mapping_mode: ColumnMappingMode,
     partition_columns: &[ColumnName],
+    clustering_columns: &[ColumnName],
     properties: &mut HashMap<String, String>,
 ) -> DeltaResult<bool> {
     let is_encryption_key = |key: &&String| key.starts_with("delta.encryption.");
@@ -593,6 +597,13 @@ pub(crate) fn validate_encryption_properties(
         .encryption_column_keys
         .filter(|keys| !keys.is_empty())
     else {
+        if !clustering_columns.is_empty() {
+            return Err(Error::generic(format!(
+                "Clustered tables cannot use uniform encryption: clustering columns need \
+                 statistics, which encrypted columns cannot have; set '{ENCRYPTION_COLUMN_KEYS}' \
+                 to the columns to encrypt"
+            )));
+        }
         return Ok(true);
     };
     if parsed.encryption_footer_key.is_none() {
@@ -606,6 +617,13 @@ pub(crate) fn validate_encryption_properties(
         let mut physical_columns = Vec::with_capacity(key.columns.len());
         // Case-insensitive column matching, as for partition and clustering columns.
         for column in normalize_column_names_to_schema_casing(schema, &key.columns) {
+            let physical = get_any_level_column_physical_name(schema, &column, column_mapping_mode)
+                .map_err(|_| {
+                    Error::generic(format!(
+                        "'{ENCRYPTION_COLUMN_KEYS}' names column '{column}', which is not in \
+                             the schema"
+                    ))
+                })?;
             if let Some(other) = seen.iter().find(|other| {
                 column.path().starts_with(other.path()) || other.path().starts_with(column.path())
             }) {
@@ -620,13 +638,17 @@ pub(crate) fn validate_encryption_properties(
                      columns cannot be encrypted"
                 )));
             }
-            let physical = get_any_level_column_physical_name(schema, &column, column_mapping_mode)
-                .map_err(|_| {
-                    Error::generic(format!(
-                        "'{ENCRYPTION_COLUMN_KEYS}' names column '{column}', which is not in \
-                             the schema"
-                    ))
-                })?;
+            // Clustering columns are physical names (see `apply_data_layout`).
+            if let Some(cluster) = clustering_columns
+                .iter()
+                .find(|cluster| cluster.path().starts_with(physical.path()))
+            {
+                return Err(Error::generic(format!(
+                    "'{ENCRYPTION_COLUMN_KEYS}' names column '{column}', which is or contains \
+                     clustering column '{cluster}'; clustering columns need statistics, which \
+                     encrypted columns cannot have"
+                )));
+            }
             seen.push(column);
             physical_columns.push(physical);
         }
@@ -1110,13 +1132,18 @@ impl CreateTableTransactionBuilder {
         maybe_enable_v2_checkpoint_for_policy(&mut validated);
 
         // Auto-enable parquetEncryption-dev when any delta.encryption.* property is set, and
-        // apply the RFC's rules for column keys against the schema and partition columns.
+        // apply the RFC's rules for column keys against the schema, partition and clustering
+        // columns.
         #[cfg(feature = "parquet-encryption-in-dev")]
         maybe_enable_parquet_encryption(
             &effective_schema,
             column_mapping_mode,
             data_layout_result
                 .partition_columns
+                .as_deref()
+                .unwrap_or_default(),
+            data_layout_result
+                .clustering_columns
                 .as_deref()
                 .unwrap_or_default(),
             &mut validated,
@@ -1377,7 +1404,7 @@ mod tests {
         ]);
         let schema = schema! { nullable "ssn": STRING };
         let mut validated = validate_extract_table_features_and_properties(properties).unwrap();
-        maybe_enable_parquet_encryption(&schema, ColumnMappingMode::None, &[], &mut validated)
+        maybe_enable_parquet_encryption(&schema, ColumnMappingMode::None, &[], &[], &mut validated)
             .unwrap();
         assert_eq!(validated.properties.len(), 5);
         assert_eq!(
@@ -1391,7 +1418,7 @@ mod tests {
 
         // No encryption property: nothing is enabled.
         let mut validated = validate_extract_table_features_and_properties(HashMap::new()).unwrap();
-        maybe_enable_parquet_encryption(&schema, ColumnMappingMode::None, &[], &mut validated)
+        maybe_enable_parquet_encryption(&schema, ColumnMappingMode::None, &[], &[], &mut validated)
             .unwrap();
         assert!(validated.reader_features.is_empty());
     }
@@ -1409,6 +1436,7 @@ mod tests {
             validate_encryption_properties(
                 &schema! { nullable "ssn": STRING },
                 ColumnMappingMode::None,
+                &[],
                 &[],
                 &mut properties,
             ),
@@ -1436,12 +1464,12 @@ mod tests {
         "lists column 'ssn' more than once"
     )]
     #[case::nested_under_ancestor(
-        &[(ENCRYPTION_FOOTER_KEY, "fk"), (ENCRYPTION_COLUMN_KEYS, "k1:address;k2:address.city")],
-        "lists column 'address.city' more than once or alongside its ancestor or descendant 'address'"
+        &[(ENCRYPTION_FOOTER_KEY, "fk"), (ENCRYPTION_COLUMN_KEYS, "k1:name;k2:name.first")],
+        "lists column 'name.first' more than once or alongside its ancestor or descendant 'name'"
     )]
     #[case::ancestor_after_nested(
-        &[(ENCRYPTION_FOOTER_KEY, "fk"), (ENCRYPTION_COLUMN_KEYS, "k1:address.city;k2:address")],
-        "lists column 'address' more than once or alongside its ancestor or descendant 'address.city'"
+        &[(ENCRYPTION_FOOTER_KEY, "fk"), (ENCRYPTION_COLUMN_KEYS, "k1:name.first;k2:name")],
+        "lists column 'name' more than once or alongside its ancestor or descendant 'name.first'"
     )]
     #[case::partition_column(
         &[(ENCRYPTION_FOOTER_KEY, "fk"), (ENCRYPTION_COLUMN_KEYS, "k:region")],
@@ -1450,6 +1478,22 @@ mod tests {
     #[case::partition_column_other_case(
         &[(ENCRYPTION_FOOTER_KEY, "fk"), (ENCRYPTION_COLUMN_KEYS, "k:REGION")],
         "names partition column 'region'"
+    )]
+    #[case::clustering_column(
+        &[(ENCRYPTION_FOOTER_KEY, "fk"), (ENCRYPTION_COLUMN_KEYS, "k:address.city")],
+        "names column 'address.city', which is or contains clustering column 'address.city'"
+    )]
+    #[case::clustering_column_ancestor(
+        &[(ENCRYPTION_FOOTER_KEY, "fk"), (ENCRYPTION_COLUMN_KEYS, "k:address")],
+        "names column 'address', which is or contains clustering column 'address.city'"
+    )]
+    #[case::uniform_encryption_with_clustering(
+        &[(ENCRYPTION_FOOTER_KEY, "fk")],
+        "Clustered tables cannot use uniform encryption"
+    )]
+    #[case::uniform_encryption_kms_only_with_clustering(
+        &[(ENCRYPTION_KMS_ID, "vault"), (ENCRYPTION_COLUMN_KEYS, "")],
+        "Clustered tables cannot use uniform encryption"
     )]
     fn test_encryption_column_keys_rules_rejected(
         #[case] properties: &[(&str, &str)],
@@ -1460,6 +1504,7 @@ mod tests {
             nullable "ssn": STRING,
             nullable "region": STRING,
             nullable "address": { nullable "city": STRING },
+            nullable "name": { nullable "first": STRING },
         };
         let mut properties = properties
             .iter()
@@ -1470,6 +1515,7 @@ mod tests {
                 &schema,
                 ColumnMappingMode::None,
                 &[column_name!("region")],
+                &[column_name!("address", "city")],
                 &mut properties,
             ),
             expected,
@@ -1505,6 +1551,7 @@ mod tests {
         assert!(validate_encryption_properties(
             &effective_schema,
             mode,
+            &[],
             &[],
             &mut validated.properties
         )

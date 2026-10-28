@@ -1100,8 +1100,10 @@ impl<S: SupportsDataFiles> Transaction<S> {
     /// Called by [`write_state`](Self::write_state), before any Parquet is written, so connectors
     /// fail fast when the schema contains unsupported data types or void placements that cannot
     /// produce valid files.
+    ///
     /// The commit-time check in [`commit`](Self::commit) remains as defense-in-depth for callers
     /// that reach [`add_files`](Self::add_files) without going through write state.
+    ///
     /// Data files may only be written to a table whose protocol kernel supports for writes and
     /// whose schema is writable. Update-table transactions already verified write support when
     /// they were created; CREATE TABLE AS SELECT has no snapshot, so it is checked here.
