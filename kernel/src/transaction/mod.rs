@@ -730,7 +730,8 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
     ///
     /// We perform this same check during [`commit`](Transaction::commit) as defense-in-depth, for
     /// callers that directly use [`add_files`](Transaction::add_files) without going through
-    /// [`write_state`](Self::write_state)
+    /// [`write_state`](Self::write_state).
+    ///
     /// Data files may only be written to a table whose protocol kernel supports for writes and
     /// whose schema is writable. Update-table transactions already verified write support when
     /// they were created; CREATE TABLE AS SELECT has no snapshot, so it is checked here.
