@@ -245,6 +245,9 @@ pub struct Transaction<S = ExistingTable> {
     // handling. Whether the connector acknowledged responsibility for applying column
     // defaults.
     column_defaults_acknowledged: bool,
+    // Whether the connector acknowledged responsibility for encrypting the data files it adds
+    // to a table with the `parquetEncryption-dev` feature.
+    parquet_encryption_acknowledged: bool,
     // Whether this transaction should be marked as a blind append.
     is_blind_append: bool,
     // Files matched by update_deletion_vectors() with new DV descriptors appended. These are used
@@ -389,6 +392,7 @@ impl<S> Transaction<S> {
         if !self.add_files_metadata.is_empty() {
             self.effective_table_config
                 .ensure_operation_supported(Operation::Write)?;
+            self.ensure_parquet_encryption_acknowledged()?;
             validate_schema_for_write(&self.effective_table_config.logical_schema())?;
         }
 
@@ -845,6 +849,21 @@ impl<S> Transaction<S> {
 
     /// Rejects write-state creation when a table declares column defaults and the connector has
     /// not acknowledged handling them.
+    fn ensure_parquet_encryption_acknowledged(&self) -> DeltaResult<()> {
+        require!(
+            self.parquet_encryption_acknowledged
+                || !self
+                    .effective_table_config
+                    .is_feature_enabled(&TableFeature::ParquetEncryptionDev),
+            Error::invalid_transaction_state(
+                "Writing data to a table with the parquetEncryption-dev feature requires \
+                 calling Transaction::ack_parquet_encryption() first: kernel does not encrypt \
+                 data files",
+            )
+        );
+        Ok(())
+    }
+
     fn ensure_column_defaults_acknowledged(&self) -> DeltaResult<()> {
         require!(
             self.column_defaults_acknowledged
@@ -969,6 +988,18 @@ impl<S: SupportsDataFiles> Transaction<S> {
         self.column_defaults_acknowledged = true;
     }
 
+    /// Acknowledges that the connector encrypts the data files it adds to a table with the
+    /// `parquetEncryption-dev` feature (draft RFC delta-io/delta#6195) and writes no statistics
+    /// for encrypted columns.
+    ///
+    /// Kernel only carries the feature through the protocol and its `delta.encryption.*`
+    /// properties; it does not encrypt. Without this acknowledgement, requesting write state or
+    /// committing Add actions on such a table fails, so kernel's own writers cannot add plaintext
+    /// files to it. Metadata-only commits need no acknowledgement.
+    pub fn ack_parquet_encryption(&mut self) {
+        self.parquet_encryption_acknowledged = true;
+    }
+
     /// Returns the expected schema for file statistics.
     ///
     /// The schema structure is derived from table configuration:
@@ -1077,6 +1108,7 @@ impl<S: SupportsDataFiles> Transaction<S> {
     fn validate_for_data_write(&self) -> DeltaResult<()> {
         self.effective_table_config
             .ensure_operation_supported(Operation::Write)?;
+        self.ensure_parquet_encryption_acknowledged()?;
         validate_schema_for_write(&self.effective_table_config.logical_schema())
     }
 
@@ -2751,11 +2783,11 @@ mod tests {
         Ok((engine, txn, tempdir))
     }
 
-    /// CREATE TABLE AS SELECT on a table whose features kernel cannot write is refused before any
-    /// data file is produced and again at commit.
+    /// CREATE TABLE AS SELECT on an encrypted table is refused before any data file is produced
+    /// until the connector acknowledges that it encrypts; then write state and commit work.
     #[cfg(feature = "parquet-encryption-in-dev")]
     #[test]
-    fn create_table_as_select_requires_write_support() -> DeltaResult<()> {
+    fn create_table_as_select_requires_encryption_acknowledgement() -> DeltaResult<()> {
         let tempdir = tempfile::tempdir()?;
         let engine = SyncEngine::new();
         let mut txn = create_table(
@@ -2765,11 +2797,16 @@ mod tests {
         )
         .with_table_properties([("delta.encryption.footer_key", "footer-key")])
         .build(&engine, Box::new(FileSystemCommitter::new()))?;
-        let expected = "Feature 'parquetEncryption-dev' is not supported for writes";
+        let expected = "requires calling Transaction::ack_parquet_encryption() first";
 
         assert_result_error_with_message(txn.write_state(), expected);
         add_dummy_file(&mut txn);
-        assert_result_error_with_message(txn.commit(&engine), expected);
+        txn.ack_parquet_encryption();
+        txn.write_state()?;
+        assert!(matches!(
+            txn.commit(&engine)?,
+            CommitResult::CommittedTransaction(_)
+        ));
         Ok(())
     }
 

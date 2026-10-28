@@ -713,35 +713,19 @@ static GEOSPATIAL_TYPE_INFO: FeatureInfo = FeatureInfo {
 };
 
 // Kernel only carries the feature through the protocol; encrypting and decrypting data files is
-// the engine's responsibility. Reads are allowed because an engine that cannot decrypt fails on
-// the files rather than leaking anything; writes are refused because kernel's default writer
-// would add plaintext files and statistics.
+// the engine's responsibility. Reads need nothing more: an engine that cannot decrypt fails on
+// the files rather than leaking anything. Data writes additionally require the connector to
+// acknowledge, with `Transaction::ack_parquet_encryption`, that it encrypts the files and omits
+// statistics for encrypted columns; without that, kernel's own Arrow-based engine
+// (`DefaultEngine`) would commit plaintext files to an encrypted table. That check lives on the
+// transaction, like `ack_column_defaults`, so metadata-only commits, CREATE TABLE and
+// checkpoints are unaffected.
 static PARQUET_ENCRYPTION_DEV_INFO: FeatureInfo = FeatureInfo {
     feature_type: FeatureType::ReaderWriter,
     min_legacy_version: None,
     feature_requirements: &[],
-    // Writes are refused to keep kernel's own Arrow-based engine (`DefaultEngine`), which does
-    // not encrypt and collects column statistics, from committing plaintext files to an
-    // encrypted table. Kernel has no way for an engine to declare that it does encrypt, so the
-    // refusal is at the protocol level and also stops a kernel transaction driven by an engine
-    // that would encrypt the files itself; such an engine must write through its own path for
-    // now. The upgrade path is an explicit acknowledgement on the transaction, like
-    // `ack_column_defaults`, that the connector encrypts data files and omits statistics for
-    // encrypted columns.
-    //
-    // Refusing `Operation::Write` blocks every path that adds data files: update-table
-    // transactions check it when they are created, and `Transaction::validate_for_data_write`
-    // checks it for `write_state()` and for commits that stage Add actions, which covers CREATE
-    // TABLE AS SELECT. A metadata-only CREATE TABLE writes no data files and never runs the
-    // write check, so an engine can still create an encrypted table through kernel.
     #[cfg(feature = "parquet-encryption-in-dev")]
-    kernel_support: KernelSupport::Custom(|_, _, op| match op {
-        Operation::Scan | Operation::Cdf => Ok(()),
-        Operation::Write => Err(Error::unsupported(
-            "Feature 'parquetEncryption-dev' is not supported for writes: kernel's writers do \
-             not encrypt data files",
-        )),
-    }),
+    kernel_support: KernelSupport::Supported,
     #[cfg(not(feature = "parquet-encryption-in-dev"))]
     kernel_support: KernelSupport::NotSupported,
     // Per the RFC the feature is active whenever it is in the protocol, with or without

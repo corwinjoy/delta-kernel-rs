@@ -1876,11 +1876,10 @@ mod test {
                         .build(),
                 )
                 .build();
+            // Supported at the protocol level; data writes are guarded by
+            // `Transaction::ack_parquet_encryption` instead.
             assert!(config.ensure_operation_supported(Operation::Scan).is_ok());
-            assert_result_error_with_message(
-                config.ensure_operation_supported(Operation::Write),
-                r#"Feature 'parquetEncryption-dev' is not supported for writes"#,
-            );
+            assert!(config.ensure_operation_supported(Operation::Write).is_ok());
         }
     }
 
