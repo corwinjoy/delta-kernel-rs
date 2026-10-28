@@ -44,7 +44,7 @@ use crate::schema::{
 use crate::snapshot::{Snapshot, SnapshotRef};
 use crate::struct_patch::ProjectionStructPatchBuilder;
 use crate::table_configuration::TableConfiguration;
-use crate::table_features::TableFeature;
+use crate::table_features::{Operation, TableFeature};
 use crate::utils::require;
 use crate::{
     version_as_i64, DataType, DeltaResult, Engine, EngineData, Expression, FileMeta,
@@ -384,9 +384,11 @@ impl<S> Transaction<S> {
         self.validate_append_only_semantics()?;
         self.ensure_schema_non_empty_for_data_writes()?;
 
-        // Validate that the schema supports data writes when files are being added. Reads and
+        // Validate that the table supports data writes when files are being added. Reads and
         // metadata-only commits are always allowed.
         if !self.add_files_metadata.is_empty() {
+            self.effective_table_config
+                .ensure_operation_supported(Operation::Write)?;
             validate_schema_for_write(&self.effective_table_config.logical_schema())?;
         }
 
@@ -1069,7 +1071,12 @@ impl<S: SupportsDataFiles> Transaction<S> {
     /// produce valid files.
     /// The commit-time check in [`commit`](Self::commit) remains as defense-in-depth for callers
     /// that reach [`add_files`](Self::add_files) without going through write state.
+    /// Data files may only be written to a table whose protocol kernel supports for writes and
+    /// whose schema is writable. Update-table transactions already verified write support when
+    /// they were created; CREATE TABLE AS SELECT has no snapshot, so it is checked here.
     fn validate_for_data_write(&self) -> DeltaResult<()> {
+        self.effective_table_config
+            .ensure_operation_supported(Operation::Write)?;
         validate_schema_for_write(&self.effective_table_config.logical_schema())
     }
 
@@ -1708,9 +1715,10 @@ mod tests {
     use crate::transaction::create_table::create_table;
     use crate::transaction::data_layout::DataLayout;
     use crate::unit_test_utils::{
-        copy_test_table, create_valid_add_file_batch, install_thread_local_metrics_reporter,
-        load_test_table, string_array_to_engine_data, test_schema_flat, test_schema_nested,
-        test_schema_with_array, test_schema_with_map, CapturingReporter,
+        assert_result_error_with_message, copy_test_table, create_valid_add_file_batch,
+        install_thread_local_metrics_reporter, load_test_table, string_array_to_engine_data,
+        test_schema_flat, test_schema_nested, test_schema_with_array, test_schema_with_map,
+        CapturingReporter,
     };
     use crate::{DeltaResultIterator, EvaluationHandler, Snapshot};
 
@@ -2741,6 +2749,28 @@ mod tests {
         let snapshot = Snapshot::builder_for(url).build(engine.as_ref())?;
         let txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?;
         Ok((engine, txn, tempdir))
+    }
+
+    /// CREATE TABLE AS SELECT on a table whose features kernel cannot write is refused before any
+    /// data file is produced and again at commit.
+    #[cfg(feature = "parquet-encryption-in-dev")]
+    #[test]
+    fn create_table_as_select_requires_write_support() -> DeltaResult<()> {
+        let tempdir = tempfile::tempdir()?;
+        let engine = SyncEngine::new();
+        let mut txn = create_table(
+            tempdir.path().to_string_lossy(),
+            test_schema_flat(),
+            "test-engine",
+        )
+        .with_table_properties([("delta.encryption.footer_key", "footer-key")])
+        .build(&engine, Box::new(FileSystemCommitter::new()))?;
+        let expected = "Feature 'parquetEncryption-dev' is not supported for writes";
+
+        assert_result_error_with_message(txn.write_state(), expected);
+        add_dummy_file(&mut txn);
+        assert_result_error_with_message(txn.commit(&engine), expected);
+        Ok(())
     }
 
     #[test]

@@ -99,6 +99,12 @@ Some noteworthy ones (see `[features]` in `kernel/Cargo.toml` for the full list)
   in development). Gates `KernelSupport` for the `geospatial` reader+writer feature: with the
   cargo feature off, any table listing it is rejected; with it on, scans and CDF are supported
   but writes are still blocked.
+- `parquet-encryption-in-dev`: Parquet Modular Encryption (draft RFC, experimental). Gates
+  `KernelSupport` for the `parquetEncryption-dev` reader+writer feature: with the cargo feature
+  off, any table listing it is rejected and CREATE TABLE refuses the `delta.encryption.*`
+  properties (which would require the feature); with it on, snapshot loads, scans, CDF and
+  CREATE TABLE are supported but data writes through kernel transactions are refused. The
+  properties always parse into `TableProperties::encryption_*`.
 - `internal-api`: unstable APIs like `parallel_scan_metadata`. Items are marked with the
   `#[internal_api]` proc macro attribute.
 - `declarative-plans`: experimental declarative-plan IR (`kernel/src/plans/`) and the prost
@@ -291,7 +297,7 @@ is the source of truth. Key concepts:
   `icebergCompatV3`, `identityColumns`, `inCommitTimestamp`, `invariants`,
   `materializePartitionColumns`, `rowTracking`
 - Reader + writer: `adaptiveMetadata-preview`, `catalogManaged`, `catalogOwned-preview`,
-  `columnMapping`, `deletionVectors`, `geospatial`, `timestampNtz`,
+  `columnMapping`, `deletionVectors`, `geospatial`, `parquetEncryption-dev`, `timestampNtz`,
   `typeWidening`, `typeWidening-preview`, `v2Checkpoint`, `vacuumProtocolCheck`,
   `variantShredding`, `variantShredding-preview`, `variantType`, `variantType-preview`
 

@@ -197,6 +197,12 @@ pub(crate) enum TableFeature {
     #[strum(serialize = "geospatial")]
     #[serde(rename = "geospatial")]
     GeospatialType,
+    /// Parquet Modular Encryption of data files, per the draft RFC delta-io/delta#6195. The
+    /// `-dev` suffix marks the feature as experimental until the RFC is standardised. Gated by
+    /// the `parquet-encryption-in-dev` cargo feature; see `PARQUET_ENCRYPTION_DEV_INFO`.
+    #[strum(serialize = "parquetEncryption-dev")]
+    #[serde(rename = "parquetEncryption-dev")]
+    ParquetEncryptionDev,
 
     #[serde(untagged)]
     #[strum(default)]
@@ -706,6 +712,36 @@ static GEOSPATIAL_TYPE_INFO: FeatureInfo = FeatureInfo {
     enablement_check: EnablementCheck::AlwaysIfSupported,
 };
 
+// Kernel only carries the feature through the protocol; encrypting and decrypting data files is
+// the engine's responsibility. Reads are allowed because an engine that cannot decrypt fails on
+// the files rather than leaking anything; writes are refused because kernel's default writer
+// would add plaintext files and statistics.
+static PARQUET_ENCRYPTION_DEV_INFO: FeatureInfo = FeatureInfo {
+    feature_type: FeatureType::ReaderWriter,
+    min_legacy_version: None,
+    feature_requirements: &[],
+    // Refusing `Operation::Write` blocks every path that adds data files: update-table
+    // transactions check it when they are created, and `Transaction::validate_for_data_write`
+    // checks it for `write_state()` and for commits that stage Add actions, which covers CREATE
+    // TABLE AS SELECT. A metadata-only CREATE TABLE writes no data files and never runs the
+    // write check, so an engine can still create an encrypted table through kernel and then
+    // write encrypted files with its own writer.
+    #[cfg(feature = "parquet-encryption-in-dev")]
+    kernel_support: KernelSupport::Custom(|_, _, op| match op {
+        Operation::Scan | Operation::Cdf => Ok(()),
+        Operation::Write => Err(Error::unsupported(
+            "Feature 'parquetEncryption-dev' is not supported for writes: kernel's writers do \
+             not encrypt data files",
+        )),
+    }),
+    #[cfg(not(feature = "parquet-encryption-in-dev"))]
+    kernel_support: KernelSupport::NotSupported,
+    // Per the RFC the feature is active whenever it is in the protocol, with or without
+    // `delta.encryption.*` properties (encryption may have been turned off). CREATE TABLE adds it
+    // when any property is set; see `maybe_enable_parquet_encryption`.
+    enablement_check: EnablementCheck::AlwaysIfSupported,
+};
+
 /// By definition, kernel cannot know how to handle unknown features and must assume they're always
 /// enabled if supported in protocol. However, the read path ignores all writer-only features,
 /// including unknown ones. Unknown features are never inferred from legacy protocol versions.
@@ -739,7 +775,8 @@ impl TableFeature {
             | TableFeature::VariantShredding
             | TableFeature::VariantShreddingPreview
             | TableFeature::AdaptiveMetadataPreview
-            | TableFeature::GeospatialType => FeatureType::ReaderWriter,
+            | TableFeature::GeospatialType
+            | TableFeature::ParquetEncryptionDev => FeatureType::ReaderWriter,
             TableFeature::AppendOnly
             | TableFeature::DomainMetadata
             | TableFeature::Invariants
@@ -812,6 +849,7 @@ impl TableFeature {
             TableFeature::VariantShreddingPreview => &VARIANT_SHREDDING_PREVIEW_INFO,
             TableFeature::AdaptiveMetadataPreview => &ADAPTIVE_METADATA_PREVIEW_INFO,
             TableFeature::GeospatialType => &GEOSPATIAL_TYPE_INFO,
+            TableFeature::ParquetEncryptionDev => &PARQUET_ENCRYPTION_DEV_INFO,
 
             // Unknown features: not supported by kernel, no legacy version inference.
             TableFeature::Unknown(_) => &UNKNOWN_FEATURE_INFO,
@@ -1076,6 +1114,28 @@ mod tests {
             ExpectRead::Unsupported
         )
     )]
+    #[cfg_attr(
+        feature = "parquet-encryption-in-dev",
+        case::parquet_encryption_supported(
+            Protocol::try_new_modern(
+                [TableFeature::ParquetEncryptionDev],
+                [TableFeature::ParquetEncryptionDev],
+            )
+            .unwrap(),
+            ExpectRead::Ok
+        )
+    )]
+    #[cfg_attr(
+        not(feature = "parquet-encryption-in-dev"),
+        case::parquet_encryption_gated_off(
+            Protocol::try_new_modern(
+                [TableFeature::ParquetEncryptionDev],
+                [TableFeature::ParquetEncryptionDev],
+            )
+            .unwrap(),
+            ExpectRead::Unsupported
+        )
+    )]
     fn validate_protocol_for_read(#[case] protocol: Protocol, #[case] expected: ExpectRead) {
         let result = ensure_table_can_be_read(&protocol);
         match expected {
@@ -1163,6 +1223,7 @@ mod tests {
                 TableFeature::AdaptiveMetadataPreview => "adaptiveMetadata-preview",
                 TableFeature::AllowColumnDefaults => "allowColumnDefaults",
                 TableFeature::GeospatialType => "geospatial",
+                TableFeature::ParquetEncryptionDev => "parquetEncryption-dev",
                 TableFeature::Unknown(_) => continue, // tested in test_unknown_features
             };
 
