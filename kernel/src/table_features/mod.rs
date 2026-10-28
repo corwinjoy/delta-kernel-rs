@@ -756,7 +756,7 @@ static PARQUET_ENCRYPTION_DEV_INFO: FeatureInfo = FeatureInfo {
     kernel_support: KernelSupport::NotSupported,
     // Per the RFC the feature is active whenever it is in the protocol, with or without
     // `delta.encryption.*` properties (encryption may have been turned off). CREATE TABLE adds it
-    // when any property is set; see `validate_encryption_properties`.
+    // when any property is set; see `maybe_enable_parquet_encryption`.
     enablement_check: EnablementCheck::AlwaysIfSupported,
 };
 

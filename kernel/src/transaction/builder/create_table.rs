@@ -105,7 +105,7 @@ const ALLOWED_DELTA_FEATURES: &[TableFeature] = &[
     // Dependent features (ColumnMapping, RowTracking, DomainMetadata) are auto-added during
     // create table.
     TableFeature::IcebergCompatV3,
-    // Parquet encryption (experimental): enabled by `validate_encryption_properties` when any
+    // Parquet encryption (experimental): enabled by `maybe_enable_parquet_encryption` when any
     // `delta.encryption.*` property is set, or explicitly via
     // `delta.feature.parquetEncryption-dev=supported`.
     #[cfg(feature = "parquet-encryption-in-dev")]
@@ -515,48 +515,67 @@ fn maybe_enable_ict_for_catalog_managed(
     Ok(())
 }
 
-/// Applies the Parquet encryption RFC at CREATE TABLE. Any `delta.encryption.*` property enables
-/// `parquetEncryption-dev`; values must parse; column keys need a footer key, every column must
-/// be in the schema, no column may be listed twice or under a listed ancestor, and partition
-/// columns cannot be encrypted. Columns are given as logical names, since physical names are
-/// only assigned here; the property is rewritten to the physical names the RFC requires under
-/// column mapping.
+/// Adds `parquetEncryption-dev` to both feature lists when [`validate_encryption_properties`]
+/// finds any `delta.encryption.*` property, as the RFC requires.
 #[cfg(feature = "parquet-encryption-in-dev")]
-fn validate_encryption_properties(
+fn maybe_enable_parquet_encryption(
     schema: &StructType,
     column_mapping_mode: ColumnMappingMode,
     partition_columns: &[ColumnName],
     validated: &mut ValidatedTableProperties,
 ) -> KernelResult<()> {
-    let is_encryption_key = |key: &&String| key.starts_with("delta.encryption.");
-    if !validated
-        .properties
-        .keys()
-        .any(|key| is_encryption_key(&key))
-    {
-        return Ok(());
+    if validate_encryption_properties(
+        schema,
+        column_mapping_mode,
+        partition_columns,
+        &mut validated.properties,
+    )? {
+        add_feature_to_lists(
+            TableFeature::ParquetEncryptionDev,
+            &mut validated.reader_features,
+            &mut validated.writer_features,
+        );
     }
-    add_feature_to_lists(
-        TableFeature::ParquetEncryptionDev,
-        &mut validated.reader_features,
-        &mut validated.writer_features,
-    );
-    let properties = TableProperties::from(validated.properties.iter());
+    Ok(())
+}
+
+/// Applies the Parquet encryption RFC's CREATE TABLE rules to `properties`: values must parse;
+/// column keys need a footer key, every column must be in the schema, no column may be listed
+/// twice or under a listed ancestor, and partition columns cannot be encrypted. Columns are
+/// given as logical names, since physical names are only assigned at create; the property is
+/// rewritten to the physical names the RFC requires under column mapping.
+///
+/// Returns whether any `delta.encryption.*` property is set, in which case the table's protocol
+/// must list `parquetEncryption-dev`. Exposed so engines that build their own CREATE TABLE
+/// commit apply the same rules.
+#[cfg(feature = "parquet-encryption-in-dev")]
+#[internal_api]
+pub(crate) fn validate_encryption_properties(
+    schema: &StructType,
+    column_mapping_mode: ColumnMappingMode,
+    partition_columns: &[ColumnName],
+    properties: &mut HashMap<String, String>,
+) -> KernelResult<bool> {
+    let is_encryption_key = |key: &&String| key.starts_with("delta.encryption.");
+    if !properties.keys().any(|key| is_encryption_key(&key)) {
+        return Ok(false);
+    }
+    let parsed = TableProperties::from(properties.iter());
     // A value that does not parse would be stored verbatim yet never reach
     // `TableProperties::encryption_*`, so refuse it rather than create a misconfigured table.
-    if let Some(key) = properties.unknown_properties.keys().find(is_encryption_key) {
+    if let Some(key) = parsed.unknown_properties.keys().find(is_encryption_key) {
         return Err(KernelError::generic(format!(
             "Property '{key}' has an invalid value: {}",
-            validated.properties[key]
+            properties[key]
         )));
     }
-    let Some(column_keys) = properties
+    let Some(column_keys) = parsed
         .encryption_column_keys
         .filter(|keys| !keys.is_empty())
     else {
-        return Ok(());
+        return Ok(true);
     };
-    if properties.encryption_footer_key.is_none() {
+    if parsed.encryption_footer_key.is_none() {
         return Err(KernelError::generic(format!(
             "'{ENCRYPTION_COLUMN_KEYS}' requires '{ENCRYPTION_FOOTER_KEY}' to be set"
         )));
@@ -596,11 +615,11 @@ fn validate_encryption_properties(
             columns: physical_columns,
         });
     }
-    validated.properties.insert(
+    properties.insert(
         ENCRYPTION_COLUMN_KEYS.to_string(),
         physical_keys.iter().join(";"),
     );
-    Ok(())
+    Ok(true)
 }
 
 fn maybe_enable_v2_checkpoint_for_policy(validated: &mut ValidatedTableProperties) {
@@ -1147,7 +1166,7 @@ impl TransactionBuilder<CreateTable> {
         // Auto-enable parquetEncryption-dev when any delta.encryption.* property is set, and
         // apply the RFC's rules for column keys against the schema and partition columns.
         #[cfg(feature = "parquet-encryption-in-dev")]
-        validate_encryption_properties(
+        maybe_enable_parquet_encryption(
             &effective_schema,
             column_mapping_mode,
             data_layout_result
@@ -1642,7 +1661,7 @@ mod tests {
         ]);
         let schema = schema! { nullable "ssn": STRING };
         let mut validated = validate_extract_table_features_and_properties(properties).unwrap();
-        validate_encryption_properties(&schema, ColumnMappingMode::None, &[], &mut validated)
+        maybe_enable_parquet_encryption(&schema, ColumnMappingMode::None, &[], &mut validated)
             .unwrap();
         assert_eq!(validated.properties.len(), 5);
         assert_eq!(
@@ -1656,7 +1675,7 @@ mod tests {
 
         // No encryption property: nothing is enabled.
         let mut validated = validate_extract_table_features_and_properties(HashMap::new()).unwrap();
-        validate_encryption_properties(&schema, ColumnMappingMode::None, &[], &mut validated)
+        maybe_enable_parquet_encryption(&schema, ColumnMappingMode::None, &[], &mut validated)
             .unwrap();
         assert!(validated.reader_features.is_empty());
     }
@@ -1669,14 +1688,13 @@ mod tests {
     #[case::column_keys_no_key_id(ENCRYPTION_COLUMN_KEYS, "pii")]
     #[case::column_keys_unterminated_quote(ENCRYPTION_COLUMN_KEYS, "pii:`ssn")]
     fn test_invalid_encryption_value_rejected(#[case] key: &str, #[case] value: &str) {
-        let properties = HashMap::from([(key.to_string(), value.to_string())]);
-        let mut validated = validate_extract_table_features_and_properties(properties).unwrap();
+        let mut properties = HashMap::from([(key.to_string(), value.to_string())]);
         assert_result_error_with_message(
             validate_encryption_properties(
                 &schema! { nullable "ssn": STRING },
                 ColumnMappingMode::None,
                 &[],
-                &mut validated,
+                &mut properties,
             ),
             &format!("Property '{key}' has an invalid value: {value}"),
         );
@@ -1727,17 +1745,16 @@ mod tests {
             nullable "region": STRING,
             nullable "address": { nullable "city": STRING },
         };
-        let properties = properties
+        let mut properties = properties
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        let mut validated = validate_extract_table_features_and_properties(properties).unwrap();
         assert_result_error_with_message(
             validate_encryption_properties(
                 &schema,
                 ColumnMappingMode::None,
                 &[column_name!("region")],
-                &mut validated,
+                &mut properties,
             ),
             expected,
         );
@@ -1769,7 +1786,13 @@ mod tests {
         let (effective_schema, effective_mode) =
             maybe_apply_column_mapping_for_table_create(&schema, &mut validated).unwrap();
         assert_eq!(effective_mode, mode);
-        validate_encryption_properties(&effective_schema, mode, &[], &mut validated).unwrap();
+        assert!(validate_encryption_properties(
+            &effective_schema,
+            mode,
+            &[],
+            &mut validated.properties
+        )
+        .unwrap());
 
         let stored = &validated.properties[ENCRYPTION_COLUMN_KEYS];
         if mode == ColumnMappingMode::None {
